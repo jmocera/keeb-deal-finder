@@ -1,7 +1,10 @@
 """Tests for the shadow-mode category tagger (ai/categorizer.py).
 
 Stdlib only (unittest + unittest.mock). Every _call_openrouter call is
-mocked — no real network calls.
+mocked — no real network calls. The model now emits a JSON object
+({"categories": [...]}) and the parser is a strict JSON parse with a
+markdown-fence / prose-extraction fallback; line-anchored extraction
+is gone.
 """
 import sys
 import unittest
@@ -42,14 +45,58 @@ class CategorizeDealsTests(unittest.TestCase):
         self.assertEqual(categorizer.categorize_deals([]), ({}, None))
 
     @patch("deal_bot.ai.categorizer._call_openrouter")
-    def test_valid_categories_are_parsed(self, mock_call):
-        mock_call.return_value = "switch\nboard\nkeycaps"
+    def test_valid_json_categories_are_parsed(self, mock_call):
+        mock_call.return_value = '{"categories": ["switch", "board", "keycaps"]}'
         deals = [_make_deal(i) for i in (1, 2, 3)]
 
         categories, model = categorizer.categorize_deals(deals)
 
         self.assertEqual(model, config.OPENROUTER_CATEGORIZER_MODEL)
-        self.assertEqual(categories, {"woot:test-1": "switch", "woot:test-2": "board", "woot:test-3": "keycaps"})
+        self.assertEqual(categories, {
+            "woot:test-1": "switch", "woot:test-2": "board", "woot:test-3": "keycaps",
+        })
+
+    @patch("deal_bot.ai.categorizer._call_openrouter")
+    def test_markdown_fence_wrapped_json_parses(self, mock_call):
+        mock_call.return_value = '```json\n{"categories": ["switch", "board", "keycaps"]}\n```'
+        deals = [_make_deal(i) for i in (1, 2, 3)]
+
+        categories, model = categorizer.categorize_deals(deals)
+
+        self.assertEqual(model, config.OPENROUTER_CATEGORIZER_MODEL)
+        self.assertEqual(categories, {
+            "woot:test-1": "switch", "woot:test-2": "board", "woot:test-3": "keycaps",
+        })
+
+    @patch("deal_bot.ai.categorizer._call_openrouter")
+    def test_prose_wrapped_json_parses(self, mock_call):
+        mock_call.return_value = 'Here are the categories:\n{"categories": ["switch", "board"]}\nDone.'
+        deals = [_make_deal(i) for i in (1, 2)]
+
+        categories, model = categorizer.categorize_deals(deals)
+
+        self.assertEqual(model, config.OPENROUTER_CATEGORIZER_MODEL)
+        self.assertEqual(categories, {"woot:test-1": "switch", "woot:test-2": "board"})
+
+    @patch("deal_bot.ai.categorizer._call_openrouter")
+    def test_extra_keys_in_json_are_ignored(self, mock_call):
+        mock_call.return_value = '{"categories": ["switch", "board"], "reasoning": "n/a", "model": "x"}'
+        deals = [_make_deal(i) for i in (1, 2)]
+
+        categories, _ = categorizer.categorize_deals(deals)
+
+        self.assertEqual(categories, {"woot:test-1": "switch", "woot:test-2": "board"})
+
+    @patch("deal_bot.ai.categorizer._call_openrouter")
+    def test_uppercase_category_normalized(self, mock_call):
+        mock_call.return_value = '{"categories": ["SWITCH", "BOARD", "Keycaps"]}'
+        deals = [_make_deal(i) for i in (1, 2, 3)]
+
+        categories, _ = categorizer.categorize_deals(deals)
+
+        self.assertEqual(categories, {
+            "woot:test-1": "switch", "woot:test-2": "board", "woot:test-3": "keycaps",
+        })
 
     @patch("deal_bot.ai.categorizer._call_openrouter")
     def test_fails_open_when_both_models_return_none(self, mock_call):
@@ -60,24 +107,34 @@ class CategorizeDealsTests(unittest.TestCase):
         self.assertEqual(mock_call.call_count, 2)
 
     @patch("deal_bot.ai.categorizer._call_openrouter")
-    def test_wrong_line_count_produces_partial_report(self, mock_call):
-        mock_call.return_value = "switch\nboard"  # 2 lines for 3 deals
+    def test_wrong_array_length_fails_open(self, mock_call):
+        mock_call.return_value = '{"categories": ["switch", "board"]}'
         categories, model = categorizer.categorize_deals([_make_deal(i) for i in (1, 2, 3)])
         self.assertEqual(categories, {})
         self.assertIsNone(model)
         self.assertEqual(mock_call.call_count, 2)
 
     @patch("deal_bot.ai.categorizer._call_openrouter")
-    def test_invalid_category_skipped_in_partial_report(self, mock_call):
-        mock_call.return_value = "switch\ntoaster"  # not a known category
+    def test_unknown_category_fails_open(self, mock_call):
+        mock_call.return_value = '{"categories": ["switch", "toaster"]}'
         categories, model = categorizer.categorize_deals([_make_deal(i) for i in (1, 2)])
         self.assertEqual(categories, {})
         self.assertIsNone(model)
         self.assertEqual(mock_call.call_count, 2)
 
     @patch("deal_bot.ai.categorizer._call_openrouter")
+    def test_model_fallback_chain_uses_fallback(self, mock_call):
+        mock_call.side_effect = [None, '{"categories": ["switch", "board"]}']
+        deals = [_make_deal(i) for i in (1, 2)]
+
+        categories, model = categorizer.categorize_deals(deals)
+
+        self.assertEqual(model, config.OPENROUTER_CATEGORIZER_FALLBACK_MODEL)
+        self.assertEqual(categories, {"woot:test-1": "switch", "woot:test-2": "board"})
+
+    @patch("deal_bot.ai.categorizer._call_openrouter")
     def test_prompt_carries_the_deals(self, mock_call):
-        mock_call.return_value = "switch\nboard"
+        mock_call.return_value = '{"categories": ["switch", "board"]}'
         deals = [_make_deal(1), _make_deal(2)]
 
         categorizer.categorize_deals(deals)
@@ -87,112 +144,122 @@ class CategorizeDealsTests(unittest.TestCase):
         self.assertIn("Deal 2", sent_user_prompt)
 
     @patch("deal_bot.ai.categorizer._call_openrouter")
-    def test_reasoning_is_omitted_for_gemma(self, mock_call):
-        mock_call.return_value = "switch"
+    def test_response_format_is_json_object(self, mock_call):
+        mock_call.return_value = '{"categories": ["switch"]}'
+        categorizer.categorize_deals([_make_deal(1)])
+        self.assertEqual(
+            mock_call.call_args.kwargs.get("response_format"),
+            {"type": "json_object"},
+        )
+
+    @patch("deal_bot.ai.categorizer._call_openrouter")
+    def test_reasoning_is_omitted(self, mock_call):
+        mock_call.return_value = '{"categories": ["switch"]}'
         categorizer.categorize_deals([_make_deal(1)])
         self.assertNotIn("reasoning", mock_call.call_args.kwargs)
 
-
-class LenientParseTests(unittest.TestCase):
-    """The strict per-line parse voids the whole report on any stray text
-    (real Gemma behavior). The lenient line-anchored regex fallback
-    salvages a report only when it yields EXACTLY len(deals) clean
-    category lines — partial salvage is intentionally removed so a
-    response can never silently mislabel a deal."""
-
-    def setUp(self):
-        self._orig_key = config.OPENROUTER_API_KEY
-        config.OPENROUTER_API_KEY = "test-key"
-
-    def tearDown(self):
-        config.OPENROUTER_API_KEY = self._orig_key
-
     @patch("deal_bot.ai.categorizer._call_openrouter")
-    def test_preamble_narration_is_ignored(self, mock_call):
-        mock_call.return_value = "My classifications:\nswitch\nboard\nkeycaps\nDone."
-        deals = [_make_deal(i) for i in (1, 2, 3)]
+    def test_system_prompt_requires_json_categories_shape(self, mock_call):
+        mock_call.return_value = '{"categories": ["switch"]}'
+        categorizer.categorize_deals([_make_deal(1)])
+        sent_system_prompt = mock_call.call_args[0][1]
+        self.assertIn('"categories"', sent_system_prompt)
+        self.assertIn("JSON object", sent_system_prompt)
+        self.assertIn("lowercased", sent_system_prompt)
+        for token in ("board", "switch", "keycaps", "accessory", "other"):
+            self.assertIn(token, sent_system_prompt)
 
-        categories, model = categorizer.categorize_deals(deals)
 
-        self.assertEqual(model, config.OPENROUTER_CATEGORIZER_MODEL)
-        self.assertEqual(categories, {"woot:test-1": "switch", "woot:test-2": "board", "woot:test-3": "keycaps"})
+class JsonParseTests(unittest.TestCase):
+    """Direct unit tests for _parse_categories_json — the strict JSON contract
+    the model is asked to emit, with a markdown-fence and prose-extraction
+    fallback for models that ignore response_format."""
 
-    @patch("deal_bot.ai.categorizer._call_openrouter")
-    def test_markdown_bullets_are_handled(self, mock_call):
-        mock_call.return_value = "- switch\n- board\n- accessory"
-        deals = [_make_deal(i) for i in (1, 2, 3)]
+    _VALID = {"board", "switch", "keycaps", "accessory", "other"}
 
-        categories, model = categorizer.categorize_deals(deals)
-
-        self.assertEqual(categories, {"woot:test-1": "switch", "woot:test-2": "board", "woot:test-3": "accessory"})
-
-    @patch("deal_bot.ai.categorizer._call_openrouter")
-    def test_case_insensitive_and_whitespace(self, mock_call):
-        mock_call.return_value = "SWITCH  \nBoard\n   keycaps   "
-        deals = [_make_deal(i) for i in (1, 2, 3)]
-
-        categories, model = categorizer.categorize_deals(deals)
-
-        self.assertEqual(categories, {"woot:test-1": "switch", "woot:test-2": "board", "woot:test-3": "keycaps"})
-
-    @patch("deal_bot.ai.categorizer._call_openrouter")
-    def test_partial_categories_produce_partial_map(self, mock_call):
-        mock_call.return_value = "switch only really sure about this one"
-        deals = [_make_deal(i) for i in (1, 2, 3)]
-
-        categories, model = categorizer.categorize_deals(deals)
-
-        self.assertEqual(categories, {})
-        self.assertIsNone(model)
-        self.assertEqual(mock_call.call_count, 2)
-
-    @patch("deal_bot.ai.categorizer._call_openrouter")
-    def test_no_valid_category_falls_through_to_next_model(self, mock_call):
-        mock_call.side_effect = ["toaster fan lamp", "toaster fan lamp"]
-        deals = [_make_deal(i) for i in (1, 2, 3)]
-
-        categories, model = categorizer.categorize_deals(deals)
-
-        self.assertEqual(categories, {})
-        self.assertIsNone(model)
-        self.assertEqual(mock_call.call_count, 2)
-
-    @patch("deal_bot.ai.categorizer._call_openrouter")
-    def test_title_echo_narration_rejects(self, mock_call):
-        # The model echoed each deal's title back as the "category" line.
-        # The old greedy regex would lift `board` out of `keyboard case`,
-        # `switch` out of `switch tester`, and `accessory` out of
-        # `the accessory`. The line-anchored regex rejects all three lines
-        # (none is a bare category word), so the run fails OPEN instead.
-        mock_call.return_value = "Keyboard Case\nswitches\nthe accessory"
-        deals = [_make_deal(i) for i in (1, 2, 3)]
-
-        categories, model = categorizer.categorize_deals(deals)
-
-        self.assertEqual(categories, {})
-        self.assertIsNone(model)
-        self.assertEqual(mock_call.call_count, 2)
-
-    @patch("deal_bot.ai.categorizer._call_openrouter")
-    def test_numbered_category_lines_parse(self, mock_call):
-        mock_call.return_value = "1. switch\n2. board\n3. keycaps"
-        deals = [_make_deal(i) for i in (1, 2, 3)]
-
-        categories, model = categorizer.categorize_deals(deals)
-
-        self.assertEqual(model, config.OPENROUTER_CATEGORIZER_MODEL)
-        self.assertEqual(categories, {
-            "woot:test-1": "switch", "woot:test-2": "board", "woot:test-3": "keycaps",
-        })
-
-    def test_extract_categories_line_anchored(self):
-        # Case-insensitive match; bare, dashed, and numbered prefixes all
-        # accepted; contaminated lines (`Keycaps Set`, `switches`) rejected.
+    def test_valid_json(self):
         self.assertEqual(
-            categorizer._extract_categories(
-                "Keycaps\nKeycaps Set\nswitches\n- board\n1. accessory"
-            ),
-            ["keycaps", "board", "accessory"],
+            categorizer._parse_categories_json('{"categories": ["switch", "board"]}', 2, self._VALID),
+            ["switch", "board"],
+        )
+
+    def test_markdown_fence_wrapped(self):
+        self.assertEqual(
+            categorizer._parse_categories_json('```json\n{"categories": ["switch"]}\n```', 1, self._VALID),
+            ["switch"],
+        )
+
+    def test_prose_wrapped_json_extracted(self):
+        resp = 'Here are the categories:\n{"categories": ["board", "keycaps"]}\nDone.'
+        self.assertEqual(
+            categorizer._parse_categories_json(resp, 2, self._VALID),
+            ["board", "keycaps"],
+        )
+
+    def test_extra_keys_ignored(self):
+        self.assertEqual(
+            categorizer._parse_categories_json(
+                '{"categories": ["switch"], "reasoning": "x", "n": 1}', 1, self._VALID),
+            ["switch"],
+        )
+
+    def test_uppercase_normalized(self):
+        self.assertEqual(
+            categorizer._parse_categories_json('{"categories": ["SWITCH", "Board"]}', 2, self._VALID),
+            ["switch", "board"],
+        )
+
+    def test_whitespace_trimmed(self):
+        self.assertEqual(
+            categorizer._parse_categories_json('{"categories": [" switch ", "board  "]}', 2, self._VALID),
+            ["switch", "board"],
+        )
+
+    def test_wrong_length_returns_none(self):
+        self.assertIsNone(
+            categorizer._parse_categories_json('{"categories": ["switch"]}', 2, self._VALID)
+        )
+
+    def test_unknown_token_returns_none(self):
+        self.assertIsNone(
+            categorizer._parse_categories_json('{"categories": ["toaster"]}', 1, self._VALID)
+        )
+
+    def test_missing_categories_key_returns_none(self):
+        self.assertIsNone(
+            categorizer._parse_categories_json('{"items": ["switch"]}', 1, self._VALID)
+        )
+
+    def test_non_list_categories_returns_none(self):
+        self.assertIsNone(
+            categorizer._parse_categories_json('{"categories": "switch"}', 1, self._VALID)
+        )
+
+    def test_non_string_element_returns_none(self):
+        self.assertIsNone(
+            categorizer._parse_categories_json('{"categories": [5]}', 1, self._VALID)
+        )
+
+    def test_non_object_json_returns_none(self):
+        self.assertIsNone(
+            categorizer._parse_categories_json('["switch", "board"]', 2, self._VALID)
+        )
+
+    def test_empty_list_returns_none_when_n_nonzero(self):
+        self.assertIsNone(
+            categorizer._parse_categories_json('{"categories": []}', 1, self._VALID)
+        )
+
+    def test_none_response_returns_none(self):
+        self.assertIsNone(categorizer._parse_categories_json(None, 1, self._VALID))
+
+    def test_empty_response_returns_none(self):
+        self.assertIsNone(categorizer._parse_categories_json("", 1, self._VALID))
+        self.assertIsNone(categorizer._parse_categories_json("   ", 1, self._VALID))
+
+    def test_invalid_json_returns_none(self):
+        self.assertIsNone(
+            categorizer._parse_categories_json("not json at all", 1, self._VALID)
         )
 
 

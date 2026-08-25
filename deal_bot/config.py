@@ -149,18 +149,32 @@ Respond with exactly one line per item, in the same order as the input. Each lin
 # call per run tagging each deal into a fine-grained category, which could
 # later drive per-category Discord channels or better hashtag/analysis
 # targeting. See ai.categorizer.categorize_deals().
-OPENROUTER_CATEGORIZER_MODEL = os.environ.get("OPENROUTER_CATEGORIZER_MODEL", "google/gemma-4-26b-a4b-it:free")
+OPENROUTER_CATEGORIZER_MODEL = os.environ.get("OPENROUTER_CATEGORIZER_MODEL", "google/gemini-2.5-flash-lite")
 OPENROUTER_CATEGORIZER_FALLBACK_MODEL = os.environ.get("OPENROUTER_CATEGORIZER_FALLBACK_MODEL", "google/gemma-4-26b-a4b-it")
 DEAL_CATEGORIES = ["board", "switch", "keycaps", "accessory", "other"]
-OPENROUTER_CATEGORIZER_SYSTEM_PROMPT = """You classify deal listings for a bot aimed at mechanical-keyboard builders and enthusiasts. For each numbered item below, assign exactly one category from this list:
+OPENROUTER_CATEGORIZER_SYSTEM_PROMPT = """You classify deal listings for a bot aimed at mechanical-keyboard builders and enthusiasts. For each numbered item below, assign exactly one category from this fixed list:
 
-- board: complete keyboards and barebones/DIY kits (boards, PCBs, cases, plates)
-- switch: switches and switch accessories (springs, films, lube, O-rings)
-- keycaps: keycap sets and single keycaps
-- accessory: cables, artisan keycaps, desk mats, wrist rests, stabilizers, tools, other keyboard accessories
-- other: anything that doesn't fit the above
+- board: Mechanical keyboards, hot-swappable PCBs, aluminum/plastic cases, plates, and barebones kits. Example: "Keychron Q Pro".
+- switch: Individual switches, stems, springs, stabilizers, and lubing supplies. Stabilizers are CORE switch mechanics — not accessories. Example: "Gateron Yellow Pro".
+- keycaps: Keycap sets (ABS/PBT), individual artisan keycaps, or cap pullers/tools designed specifically for keycaps. Example: "GMK Alice Set".
+- accessory: Everything else — desk mats, coiled cables (if not part of a bundle), wrist rests, tools (multi-tools/keycap/puller combos), and cleaning supplies. ONLY for items that are genuinely mechanical-keyboard accessories, not generic electronics. Example: "Purple Pudding Desk Mat".
+- other: Only if the item genuinely doesn't fit any other category. Generic electronics (mice, chargers, stands), non-keyboard peripherals, and items where "keyboard" is incidental (e.g. "iPad keyboard stand") belong here.
 
-Respond with exactly one line per item, in the same order as the input, each line being a single category word from the list — nothing else. No numbering, no explanation, no extra text. The number of output lines must exactly match the number of input items."""
+Few-shot examples (input -> expected output):
+1. [Woot] GMK Meow-achi Keycap Set — $79.99 (keycaps)
+2. [Shopify] Gateron Oil Red Linear Switches (110-pack) — $24.50 (switch)
+3. [Best Buy] Keychron Q1 QMK Custom Keyboard (barebones) — $149.99 (board)
+4. [Woot] Epomaker x F99 Barebones 75% Hot-Swap — $89.99 (board)
+5. [Shopify] KBDfans 1.5m Coiled Aviator Cable — $19.00 (accessory)
+6. [Woot] Deskey 3D Desk Mat — $14.99 (accessory)
+7. [Best Buy] Logitech G Pro Superlight Mouse — $69.99 (other)
+8. [Shopify] GMK Striker Single Keycap (1u Esc) — $8.00 (keycaps)
+9. [Shopify] Durock Plate Mount Stabilizer Set (2u) — $12.00 (switch)
+10. [Best Buy] iPad Keyboard Stand — Adjustable Aluminum — $35.00 (other)
+
+Respond with ONLY a JSON object in this exact shape, with EXACTLY one category string per input item, in the same order:
+{"categories": ["board", "switch", ...]}
+Each category string must be one of the five words above, lowercased. The number of strings must exactly match the number of input items."""
 
 # Spec extraction — cleans up messy retail titles (Woot/Best Buy/Shopify)
 # into a concise product name plus a few short technical specs, for the
