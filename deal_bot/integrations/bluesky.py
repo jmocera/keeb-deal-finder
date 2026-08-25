@@ -1,0 +1,228 @@
+"""Bluesky posting — raw AT Protocol REST/XRPC calls (no SDK, consistent
+with the rest of the project's minimal-dependency approach).
+
+XRPC POSTs deliberately bypass transport.request's auto-retry:
+createRecord is non-idempotent, so a retried POST whose response was lost
+would duplicate the post publicly — these calls fail open (return False)
+instead of retrying."""
+
+from datetime import datetime, timezone
+
+import requests
+
+from deal_bot import config
+from deal_bot.ai.captions import _HASHTAG_PATTERN, build_ai_caption_body
+from deal_bot.display import price_str
+from deal_bot.post_len import fit_deal_post, hard_target, truncate_to
+
+_bluesky_session = None  # cached for the duration of one run, avoids re-login per post
+
+
+def _bluesky_login() -> dict | None:
+    global _bluesky_session
+    if _bluesky_session:
+        return _bluesky_session
+    if not config.BLUESKY_HANDLE or not config.BLUESKY_APP_PASSWORD:
+        return None
+    try:
+        resp = requests.post(
+            "https://bsky.social/xrpc/com.atproto.server.createSession",
+            json={"identifier": config.BLUESKY_HANDLE, "password": config.BLUESKY_APP_PASSWORD},
+            timeout=10,
+        )
+        resp.raise_for_status()
+    except requests.RequestException as e:
+        print(f"[bluesky] login failed: {e}")
+        return None
+    _bluesky_session = resp.json()
+    # A 200 response with an unexpected shape (missing/empty accessJwt or
+    # did) would KeyError later mid-post — validate up front and fail open
+    # (no post attempted), never caching the unusable session.
+    if not (isinstance(_bluesky_session, dict)
+            and isinstance(_bluesky_session.get("accessJwt"), str) and _bluesky_session["accessJwt"]
+            and isinstance(_bluesky_session.get("did"), str) and _bluesky_session["did"]):
+        print(f"[bluesky] login response missing accessJwt/did — refusing to cache: {str(_bluesky_session)[:120]}")
+        _bluesky_session = None
+    return _bluesky_session
+
+
+def _build_tag_facets(text: str) -> list[dict]:
+    """One app.bsky.richtext.facet#tag per #hashtag in text. Byte offsets
+    (not character offsets) computed the same way as the URL link facet
+    below — encode the prefix up to each match to correctly account for
+    any multi-byte characters (em dashes, accents) earlier in the text."""
+    facets = []
+    for match in _HASHTAG_PATTERN.finditer(text):
+        tag_name = match.group(1)
+        byte_start = len(text[:match.start()].encode("utf-8"))
+        byte_end = len(text[:match.end()].encode("utf-8"))
+        facets.append({
+            "index": {"byteStart": byte_start, "byteEnd": byte_end},
+            "features": [{"$type": "app.bsky.richtext.facet#tag", "tag": tag_name}],
+        })
+    return facets
+
+
+def _build_bluesky_embed(session: dict, deal: dict) -> dict | None:
+    """Downloads the deal's image and uploads it as a blob for a rich
+    external-link preview card. Fails open at every step — no image URL,
+    a download error, a non-image response, or an uploadBlob failure all
+    just mean no card; post_to_bluesky() still sends the post as plain
+    text+facets either way."""
+    image_url = deal.get("image")
+    if not image_url:
+        return None
+
+    try:
+        img_resp = requests.get(image_url, timeout=10)
+        img_resp.raise_for_status()
+    except requests.RequestException as e:
+        print(f"[bluesky] thumbnail download failed: {e}")
+        return None
+
+    content_type = img_resp.headers.get("Content-Type", "").split(";")[0].strip()
+    if not content_type.startswith("image/"):
+        print(f"[bluesky] thumbnail skipped — unexpected content-type {content_type!r}")
+        return None
+
+    # Bluesky's PDS blob cap is ~1MB — fail fast client-side rather than
+    # relying on the PDS to reject the upload (see the comment below).
+    if len(img_resp.content) > 1_000_000:
+        print(f"[bluesky] thumbnail skipped — {len(img_resp.content)} bytes exceeds the 1MB blob cap")
+        return None
+
+    try:
+        blob_resp = requests.post(
+            "https://bsky.social/xrpc/com.atproto.repo.uploadBlob",
+            headers={
+                "Authorization": f"Bearer {session['accessJwt']}",
+                "Content-Type": content_type,
+            },
+            data=img_resp.content,
+            timeout=20,
+        )
+    except requests.RequestException as e:
+        print(f"[bluesky] thumbnail upload failed: {e}")
+        return None
+    # Covers oversized images too — the PDS rejects those with a non-200
+    # rather than us needing to guess its exact size cap up front.
+    if blob_resp.status_code != 200:
+        print(f"[bluesky] thumbnail upload returned {blob_resp.status_code}: {blob_resp.text[:300]}")
+        return None
+
+    try:
+        blob = blob_resp.json()["blob"]
+    except (KeyError, ValueError, TypeError) as e:
+        print(f"[bluesky] unexpected uploadBlob response shape: {e}")
+        return None
+
+    description = price_str(deal["sale_price"], deal["list_price"])
+    if deal["list_price"]:
+        description = f"Now {description}"
+
+    return {
+        "$type": "app.bsky.embed.external",
+        "external": {
+            "uri": deal["url"],
+            "title": deal["title"][:300],
+            "description": description,
+            "thumb": blob,
+        },
+    }
+
+
+def post_to_bluesky(deal: dict) -> bool:
+    session = _bluesky_login()
+    if not session:
+        return False
+
+    # Body: the caption precomputed by the consolidated verdicts batch
+    # (pipeline Phase B — same text the Discord private mirror carries),
+    # or the per-deal LLM chain when absent. The URL is appended by
+    # fit_deal_post, which keeps the whole post within the Bluesky limit
+    # AND preserves the trailing hashtag run by trimming the prose
+    # instead of tail-slicing the caption.
+    caption = deal.get("caption") or build_ai_caption_body(deal)
+    text = fit_deal_post(caption, deal["url"])
+
+    record = {
+        "$type": "app.bsky.feed.post",
+        "text": text,
+        "createdAt": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+    }
+
+    # AT Protocol doesn't auto-linkify plain URLs in post text the way
+    # most social apps do — without an explicit "facet" marking the byte
+    # range and its target, a URL renders as inert plain text (exactly
+    # what was happening). Byte offsets, not character offsets: facets
+    # are defined over the UTF-8-encoded text, and this caption can
+    # contain multi-byte characters (e.g. the em dash) before the URL.
+    # Note: facets are always computed on the FINAL fitted `text` — the
+    # only place the text changes is fit_deal_post, above, so these
+    # offsets can never go stale.
+    facets = []
+    url_bytes = deal["url"].encode("utf-8")
+    text_bytes = text.encode("utf-8")
+    idx = text_bytes.find(url_bytes)
+    if idx != -1:
+        facets.append({
+            "index": {"byteStart": idx, "byteEnd": idx + len(url_bytes)},
+            "features": [{"$type": "app.bsky.richtext.facet#link", "uri": deal["url"]}],
+        })
+    facets.extend(_build_tag_facets(text))
+    if facets:
+        facets.sort(key=lambda f: f["index"]["byteStart"])
+        record["facets"] = facets
+
+    # Embed attempt is strictly LAST and must never affect the text/facets
+    # above — a None embed just omits the card, the post still goes out.
+    embed = _build_bluesky_embed(session, deal)
+    if embed:
+        record["embed"] = embed
+
+    try:
+        resp = requests.post(
+            "https://bsky.social/xrpc/com.atproto.repo.createRecord",
+            headers={"Authorization": f"Bearer {session['accessJwt']}"},
+            json={"repo": session["did"], "collection": "app.bsky.feed.post", "record": record},
+            timeout=10,
+        )
+    except requests.RequestException as e:
+        print(f"[bluesky] post failed: {e}")
+        return False
+
+    if resp.status_code != 200:
+        print(f"[bluesky] post returned {resp.status_code}: {resp.text[:300]}")
+        return False
+    return True
+
+
+def post_text_to_bluesky(text: str) -> bool:
+    """Post plain text (e.g. the weekly digest) to Bluesky. Truncates to
+    the hard target. No link facet or embed — a digest has no single URL to link."""
+    session = _bluesky_login()
+    if not session:
+        return False
+
+    text = truncate_to(text, hard_target())
+
+    record = {
+        "$type": "app.bsky.feed.post",
+        "text": text,
+        "createdAt": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+    }
+    try:
+        resp = requests.post(
+            "https://bsky.social/xrpc/com.atproto.repo.createRecord",
+            headers={"Authorization": f"Bearer {session['accessJwt']}"},
+            json={"repo": session["did"], "collection": "app.bsky.feed.post", "record": record},
+            timeout=10,
+        )
+    except requests.RequestException as e:
+        print(f"[bluesky] post failed: {e}")
+        return False
+
+    if resp.status_code != 200:
+        print(f"[bluesky] post returned {resp.status_code}: {resp.text[:300]}")
+        return False
+    return True

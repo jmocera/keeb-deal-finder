@@ -1,0 +1,47 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "model": "openrouter/deepseek/deepseek-v4-flash-0731",
+  "permission": {
+    "edit": "allow",
+    "bash": "allow"
+  },
+  "agent": {
+    "plan": {
+      "mode": "primary",
+      "model": "openrouter/deepseek/deepseek-v4-flash-0731",
+      "description": "Fast planning and feature scoping",
+      "reasoningEffort": "low",
+      "permission": {
+        "edit": "deny",
+        "bash": "deny"
+      }
+    },
+    "build": {
+      "mode": "primary",
+      "model": "openrouter/deepseek/deepseek-v4-flash-0731",
+      "description": "Implements code against architect contracts and plan scope",
+      "reasoningEffort": "high"
+    },
+    "architect": {
+      "mode": "subagent",
+      "model": "openrouter/z-ai/glm-5.2",
+      "reasoningEffort": "xhigh",
+      "description": "Lead architect for database migrations, deduplication schemas, and pipeline design",
+      "prompt": "You are the Lead Python and Data Pipeline Architect. Design modular, resilient architecture for deal processing scripts. Focus on: 1) Schema design and deduplication tracking in Supabase, 2) Robust rate-limiting and retry logic for OpenRouter LLM API calls, 3) Discord Embed formatting and Bluesky (atproto) posting mechanisms, 4) Secure credential handling via python-dotenv. Output concrete class/function contracts, SQL migrations, and error-handling strategies. Do not write filler boilerplate prose.",
+      "permission": {
+        "edit": "deny",
+        "bash": "deny"
+      }
+    },
+    "code-reviewer": {
+      "mode": "subagent",
+      "model": "openrouter/minimax/minimax-m3",
+      "description": "Reviews Python code diffs for security, rate limits, async leaks, and database integrity",
+      "prompt": "You are a senior Python code reviewer and security auditor. Inspect the git diff and modified files. Verify that: 1) API keys and webhooks are strictly read from environment variables, 2) External API requests (Discord, Bluesky, OpenRouter, Supabase) implement exponential backoff, timeout configs, and error catching, 3) Deduplication checks in Supabase prevent double-posting deals, 4) Bluesky rich-text facets (links/mentions) are properly structured, 5) Type hints and docstrings are present. Report only actionable issues.",
+      "permission": {
+        "edit": "deny",
+        "bash": "allow"
+      }
+    }
+  }
+}
