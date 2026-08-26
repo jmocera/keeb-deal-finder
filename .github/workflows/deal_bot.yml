@@ -1,12 +1,13 @@
 name: deal-bot
 
 "on":
-  schedule:
-    # Every 4 hours, on the hour. GitHub doesn't guarantee exact timing on
-    # schedule triggers (can lag a few minutes under load), which doesn't
-    # matter for this use case. Adjust the cadence here if needed.
-    - cron: "0 */4 * * *"
-  workflow_dispatch: {}  # lets you trigger a run manually from the Actions tab
+  push:
+  pull_request:
+  workflow_dispatch: {}
+  # The 4-hour schedule is owned by the always-on Discord bot service
+  # (`python -m deal_bot --bot`). This workflow is CI (unit tests) only.
+  # schedule:
+  #   - cron: "0 */4 * * *"
 
 jobs:
   run:
@@ -25,58 +26,6 @@ jobs:
       - name: Run Unit Tests
         run: python -m unittest discover -s tests -p "test_*.py"
 
-      # Runs even if the tests above failed (if: always()) — a test
-      # regression should be visible (the step above shows red), but
-      # must never be able to silently block the scheduled run itself.
-      # That's the failure mode run_log/RUN_LOG_WEBHOOK_URL exist to
-      # prevent: an unattended pipeline going quiet with nothing to
-      # notice except the absence of activity.
-      - name: Run deal_bot
-        if: always()
-        run: python -m deal_bot
-        env:
-          WOOT_API_KEY: ${{ secrets.WOOT_API_KEY }}
-          BESTBUY_API_KEY: ${{ secrets.BESTBUY_API_KEY }}
-          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
-          WOOT_WEBHOOK_URL: ${{ secrets.WOOT_WEBHOOK_URL }}
-          BESTBUY_WEBHOOK_URL: ${{ secrets.BESTBUY_WEBHOOK_URL }}
-          SHOPIFY_WEBHOOK_URL: ${{ secrets.SHOPIFY_WEBHOOK_URL }}
-          PRIVATE_WEBHOOK_URL: ${{ secrets.PRIVATE_WEBHOOK_URL }}
-          DIGEST_WEBHOOK_URL: ${{ secrets.DIGEST_WEBHOOK_URL }}
-          RUN_LOG_WEBHOOK_URL: ${{ secrets.RUN_LOG_WEBHOOK_URL }}
-          SHADOW_CLASSIFIER_WEBHOOK_URL: ${{ secrets.SHADOW_CLASSIFIER_WEBHOOK_URL }}
-          SHADOW_QUALITY_SCORER_WEBHOOK_URL: ${{ secrets.SHADOW_QUALITY_SCORER_WEBHOOK_URL }}
-          SHADOW_CATEGORIZER_WEBHOOK_URL: ${{ secrets.SHADOW_CATEGORIZER_WEBHOOK_URL }}
-          BLUESKY_HANDLE: ${{ secrets.BLUESKY_HANDLE }}
-          BLUESKY_APP_PASSWORD: ${{ secrets.BLUESKY_APP_PASSWORD }}
-          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
-          OPENROUTER_PRIMARY_MODEL: ${{ vars.OPENROUTER_PRIMARY_MODEL }}
-          OPENROUTER_FALLBACK_MODEL: ${{ vars.OPENROUTER_FALLBACK_MODEL }}
-          OPENROUTER_SPEC_EXTRACTION_MODEL: ${{ vars.OPENROUTER_SPEC_EXTRACTION_MODEL }}
-          OPENROUTER_SPEC_FALLBACK_MODEL: ${{ vars.OPENROUTER_SPEC_FALLBACK_MODEL }}
-          OPENROUTER_QUALITY_SCORER_MODEL: ${{ vars.OPENROUTER_QUALITY_SCORER_MODEL }}
-          OPENROUTER_QUALITY_SCORER_FALLBACK_MODEL: ${{ vars.OPENROUTER_QUALITY_SCORER_FALLBACK_MODEL }}
-          OPENROUTER_CATEGORIZER_MODEL: ${{ vars.OPENROUTER_CATEGORIZER_MODEL }}
-          OPENROUTER_CATEGORIZER_FALLBACK_MODEL: ${{ vars.OPENROUTER_CATEGORIZER_FALLBACK_MODEL }}
-          # Plain tuning numbers, not credentials — repo Variables (not
-          # Secrets) so they stay visible/editable via Settings -> Secrets
-          # and variables -> Actions -> Variables instead of being
-          # write-only.
-          MIN_DISCOUNT_PERCENT: ${{ vars.MIN_DISCOUNT_PERCENT }}
-          MIN_DOLLAR_SAVINGS: ${{ vars.MIN_DOLLAR_SAVINGS }}
-          # Shopify source tuning — repo Variables (not Secrets): the JSON
-          # store list and the throttle/collection knobs.
-          SHOPIFY_STORES: ${{ vars.SHOPIFY_STORES }}
-          SHOPIFY_THROTTLE_MIN: ${{ vars.SHOPIFY_THROTTLE_MIN }}
-          SHOPIFY_THROTTLE_MAX: ${{ vars.SHOPIFY_THROTTLE_MAX }}
-          SHOPIFY_MAX_COLLECTIONS_PER_STORE: ${{ vars.SHOPIFY_MAX_COLLECTIONS_PER_STORE }}
-          BLUESKY_MIN_DISCOUNT_PERCENT: ${{ vars.BLUESKY_MIN_DISCOUNT_PERCENT }}
-          BLUESKY_MAX_POSTS_PER_RUN: ${{ vars.BLUESKY_MAX_POSTS_PER_RUN }}
-          PRICE_HISTORY_MIN_DAYS: ${{ vars.PRICE_HISTORY_MIN_DAYS }}
-          PRICE_HISTORY_TOLERANCE_PERCENT: ${{ vars.PRICE_HISTORY_TOLERANCE_PERCENT }}
-          MIN_QUALITY_SCORE: ${{ vars.MIN_QUALITY_SCORE }}
-          # "shadow" (default) reports classifier verdicts without gating;
-          # flipping this repo Variable to "gate" promotes it to a real
-          # pre-posting filter — no code change needed.
-          CLASSIFIER_MODE: ${{ vars.CLASSIFIER_MODE }}
+      # Production `python -m deal_bot` step removed: the always-on bot
+      # service now owns the 4-hour cadence. Running it here would
+      # duplicate posts. This workflow stays as CI.

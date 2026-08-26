@@ -18,11 +18,19 @@ from deal_bot.integrations.discord import (
     build_run_log_embed,
     build_shadow_classification_embed,
     post_to_discord,
+    post_deal_to_guilds,
+    post_digest_to_guilds,
     _post_webhook,
 )
 from deal_bot.sources.bestbuy import fetch_bestbuy_search
 from deal_bot.sources.shopify import fetch_all_shopify_stores
 from deal_bot.sources.woot import fetch_woot_feed
+from deal_bot.storage.guilds import (
+    load_guild_destinations,
+    load_guild_posted_ids,
+    mark_initial_sync_complete,
+    record_guild_post,
+)
 from deal_bot.storage.price_history import (
     get_price_history_stats_bulk,
     record_price_observations,
@@ -101,6 +109,20 @@ def run_once() -> None:
             error="load_seen failed (Supabase unreachable) — bailed to avoid double-posting",
         )
         return
+    destinations = load_guild_destinations()
+    if destinations is None:
+        log_run(
+            deals_checked=0, posted=0, skipped_already_seen=0,
+            skipped_no_better_price=0, skipped_below_threshold=0,
+            skipped_not_near_historical_low=0,
+            skipped_not_desirable=0, shadow_sent=False, digest_sent=False,
+            error="load_guild_destinations failed (Supabase unreachable) — bailed to avoid mis-delivery",
+        )
+        return
+    guild_posted_ids_map = {
+        str(dest["guild_id"]): load_guild_posted_ids(dest["guild_id"])
+        for dest in destinations
+    }
     all_deals = []
     # Mutated in place by _process_deals rather than returned at the end —
     # if the loop raises partway through (after some deals already
@@ -152,7 +174,11 @@ def run_once() -> None:
         # live request per deal inside the posting loop.
         history_map = get_price_history_stats_bulk([d["id"] for d in all_deals])
 
-        _process_deals(all_deals, seen, digest_stats, stats, history_map)
+        _process_deals(
+            all_deals, seen, digest_stats, stats, history_map,
+            destinations=destinations,
+            guild_posted_ids_map=guild_posted_ids_map,
+        )
     except Exception as e:
         log_run(
             deals_checked=len(all_deals), posted=stats["new_count"],
@@ -223,7 +249,9 @@ def _skip_reason(deal: dict, prior: dict | None, history_days: int, history_low:
 
 
 def _process_deals(
-    all_deals: list[dict], seen: dict, digest_stats: dict, stats: dict, history_map: dict
+    all_deals: list[dict], seen: dict, digest_stats: dict, stats: dict, history_map: dict,
+    destinations: list[dict] | None = None,
+    guild_posted_ids_map: dict[str, set[str]] | None = None,
 ) -> None:
     """Posting pipeline, structured in explicit phases so AI judgment runs
     BEFORE posting (the desirability classifier can gate when
@@ -235,6 +263,8 @@ def _process_deals(
     gate; C) post loop; D) capped Bluesky + digest + shadow reports.
     Mutates `stats` in place rather than returning at the end — run_once()
     depends on that for crash-accurate run_log counts."""
+    destinations = list(destinations or [])
+    guild_posted_ids_map = guild_posted_ids_map if guild_posted_ids_map is not None else {}
     bluesky_candidates = []  # collected here, ranked and capped after the loop
 
     # ---- PHASE A — deterministic filter into a candidate list -------------
@@ -283,37 +313,77 @@ def _process_deals(
             print(f"[gate] desirability classifier withheld {len(drop)} candidate(s)")
 
     # ---- PHASE C — post loop ---------------------------------------------
+    # Initial sync: first run after /setup seeds current candidates as
+    # already-posted so a new guild is not flooded. Delivery starts next run.
+    if destinations:
+        for dest in destinations:
+            if dest.get("initial_sync_complete"):
+                continue
+            guild_id = str(dest["guild_id"])
+            posted = guild_posted_ids_map.setdefault(guild_id, set())
+            seeded_ok = True
+            for deal in candidates:
+                if deal["id"] in posted:
+                    continue
+                if record_guild_post(guild_id, deal["id"], deal["sale_price"]):
+                    posted.add(deal["id"])
+                else:
+                    seeded_ok = False
+            if seeded_ok:
+                mark_initial_sync_complete(guild_id)
+                dest["initial_sync_complete"] = True
+
     for deal in candidates:
-        if post_to_discord(deal):
-            seen[deal["id"]] = {
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-                "sale_price": deal["sale_price"],
-                "lowest_price": deal["lowest_price"],
-                "lowest_price_date": deal["lowest_price_date"],
+        if destinations:
+            delivered = post_deal_to_guilds(deal, destinations, guild_posted_ids_map)
+            posted_ok = delivered > 0
+            if not posted_ok:
+                enabled = [d for d in destinations if d.get("enabled", True)]
+                already = enabled and all(
+                    deal["id"] in guild_posted_ids_map.get(str(d["guild_id"]), set())
+                    for d in enabled
+                )
+                if already:
+                    seen[deal["id"]] = {
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                        "sale_price": deal["sale_price"],
+                        "lowest_price": deal["lowest_price"],
+                        "lowest_price_date": deal["lowest_price_date"],
+                    }
+                    upsert_seen_entry(deal["id"], deal["source"], seen[deal["id"]])
+                continue
+        elif not post_to_discord(deal):
+            continue
+
+        seen[deal["id"]] = {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "sale_price": deal["sale_price"],
+            "lowest_price": deal["lowest_price"],
+            "lowest_price_date": deal["lowest_price_date"],
+        }
+        upsert_seen_entry(deal["id"], deal["source"], seen[deal["id"]])
+        record_posted_deal(deal)
+        stats["new_count"] += 1
+        time.sleep(2)
+
+        source_stats = digest_stats.setdefault(deal["source"], {"count": 0, "total_savings": 0.0, "best": None})
+        source_stats["count"] += 1
+        if deal["list_price"]:
+            source_stats["total_savings"] += deal["list_price"] - deal["sale_price"]
+        best = source_stats["best"]
+        if best is None or (deal["discount_pct"] or 0) > (best["discount_pct"] or 0):
+            source_stats["best"] = {
+                "title": deal["title"],
+                "url": deal["url"],
+                "discount_pct": deal["discount_pct"],
             }
-            upsert_seen_entry(deal["id"], deal["source"], seen[deal["id"]])  # write immediately so a Ctrl+C or later failure doesn't lose this
-            record_posted_deal(deal)  # append-only log backing the weekly digest (fails silent if the table isn't created yet)
-            stats["new_count"] += 1
-            time.sleep(2)  # be gentle with the Discord webhook rate limit
 
-            source_stats = digest_stats.setdefault(deal["source"], {"count": 0, "total_savings": 0.0, "best": None})
-            source_stats["count"] += 1
-            if deal["list_price"]:
-                source_stats["total_savings"] += deal["list_price"] - deal["sale_price"]
-            best = source_stats["best"]
-            if best is None or (deal["discount_pct"] or 0) > (best["discount_pct"] or 0):
-                source_stats["best"] = {
-                    "title": deal["title"],
-                    "url": deal["url"],
-                    "discount_pct": deal["discount_pct"],
-                }
-
-            # Bluesky candidacy only — actual posting happens after the loop,
-            # capped to the top BLUESKY_MAX_POSTS_PER_RUN by $ saved. Requires a
-            # known list price to rank by savings.
-            if (deal["discount_pct"] is not None and deal["discount_pct"] >= config.BLUESKY_MIN_DISCOUNT_PERCENT
-                    and deal["list_price"]):
-                bluesky_candidates.append(deal)
+        # Bluesky candidacy only — actual posting happens after the loop,
+        # capped to the top BLUESKY_MAX_POSTS_PER_RUN by $ saved. Requires a
+        # known list price to rank by savings.
+        if (deal["discount_pct"] is not None and deal["discount_pct"] >= config.BLUESKY_MIN_DISCOUNT_PERCENT
+                and deal["list_price"]):
+            bluesky_candidates.append(deal)
 
     # ---- PHASE: post-loop — prune, digest, capped bluesky -----------------
     prune_seen(config.SEEN_TTL_DAYS)
@@ -329,10 +399,14 @@ def _process_deals(
 
     # Only send a digest when there's something to report — an empty
     # "0 posted" message every run would just be noise.
-    if stats["new_count"] > 0 and config.DIGEST_WEBHOOK_URL:
-        stats["digest_sent"] = _post_webhook(
-            config.DIGEST_WEBHOOK_URL, {"embeds": [build_digest_embed(digest_stats)]}, "digest"
-        )
+    if stats["new_count"] > 0:
+        if destinations:
+            post_digest_to_guilds(build_digest_embed(digest_stats), destinations)
+            stats["digest_sent"] = True
+        elif config.DIGEST_WEBHOOK_URL:
+            stats["digest_sent"] = _post_webhook(
+                config.DIGEST_WEBHOOK_URL, {"embeds": [build_digest_embed(digest_stats)]}, "digest"
+            )
 
     bluesky_candidates.sort(key=lambda d: d["list_price"] - d["sale_price"], reverse=True)
     for deal in bluesky_candidates[:config.BLUESKY_MAX_POSTS_PER_RUN]:

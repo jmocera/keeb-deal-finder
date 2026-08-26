@@ -1,9 +1,10 @@
-"""Discord posting — embed builders and webhook delivery.
+"""Discord posting — embed builders, webhook delivery, and native bot messages.
 
-Webhook POSTs deliberately bypass transport.request's auto-retry: they are
-non-idempotent (a retried POST whose response was lost would double-post
-the deal), so _post_webhook carries its own bounded loop that retries ONLY
-explicit rate-limit responses, never network errors."""
+Webhook POSTs and native bot channel POSTs deliberately bypass
+transport.request's auto-retry: they are non-idempotent (a retried POST
+whose response was lost would double-post the deal). Each carries its own
+bounded loop that retries ONLY explicit 429s, never network errors.
+"""
 
 import time
 from datetime import datetime, timezone
@@ -12,6 +13,7 @@ import requests
 
 from deal_bot import config
 from deal_bot.ai.captions import build_ai_caption
+from deal_bot.storage.guilds import record_guild_post
 from deal_bot.value_metrics import value_metric_field
 
 
@@ -327,3 +329,89 @@ def post_to_discord(deal: dict) -> bool:
         _post_webhook(config.PRIVATE_WEBHOOK_URL, {"content": f"{warning}```{caption}```"}, "private-caption")
 
     return success
+
+
+def _post_bot_message(channel_id: str, payload: dict, label: str) -> bool:
+    """Native bot channel create-message. Retry 429 only; never network errors."""
+    token = config.DISCORD_BOT_TOKEN
+    if not token:
+        print(f"[discord:{label}] DISCORD_BOT_TOKEN unset — skipping")
+        return False
+    url = f"https://discord.com/api/v10/channels/{channel_id}/messages"
+    headers = {
+        "Authorization": f"Bot {token}",
+        "Content-Type": "application/json",
+        "User-Agent": "VoltDropDealBot (https://github.com/jmocera/keeb-deal-finder, 1.0)",
+    }
+    max_retries = 5
+    for attempt in range(1, max_retries + 1):
+        try:
+            resp = requests.post(url, json=payload, headers=headers, timeout=10)
+        except requests.RequestException as e:
+            print(f"[discord:{label}] post failed: {e}")
+            return False
+
+        if resp.status_code in (200, 201, 204):
+            return True
+
+        if resp.status_code == 429:
+            try:
+                retry_after = float(resp.json().get("retry_after", 1))
+            except (ValueError, TypeError):
+                retry_after = 1.0
+            wait = retry_after + 0.25
+            print(f"[discord:{label}] rate limited, waiting {wait:.2f}s (attempt {attempt}/{max_retries})")
+            time.sleep(wait)
+            continue
+
+        print(f"[discord:{label}] bot post returned {resp.status_code}: {resp.text[:300]}")
+        return False
+
+    print(f"[discord:{label}] gave up after repeated rate limits")
+    return False
+
+
+def post_deal_to_guilds(deal: dict, destinations: list, guild_posted_ids: dict) -> int:
+    """Deliver one deal embed to each enabled, synced guild that hasn't received it.
+
+    destinations: [{guild_id, channel_id, enabled, initial_sync_complete}]
+    guild_posted_ids: {guild_id: set[deal_id]}  — mutated in place on success.
+    Returns the count of successful deliveries. Never raises.
+    """
+    if not destinations:
+        return 0
+    embed = build_embed(deal)
+    deal_id = deal["id"]
+    delivered = 0
+    for dest in destinations:
+        if not dest.get("enabled", True):
+            continue
+        if dest.get("initial_sync_complete") is False:
+            continue
+        guild_id = str(dest["guild_id"])
+        posted = guild_posted_ids.setdefault(guild_id, set())
+        if deal_id in posted:
+            continue
+        label = f"guild:{guild_id}"
+        ok = _post_bot_message(str(dest["channel_id"]), {"embeds": [embed]}, label)
+        if not ok:
+            continue
+        if record_guild_post(guild_id, deal_id, deal["sale_price"]):
+            posted.add(deal_id)
+        delivered += 1
+    return delivered
+
+
+def post_digest_to_guilds(digest_embed: dict, destinations: list) -> None:
+    """End-of-run digest to every enabled destination. Failures print and continue."""
+    if not destinations:
+        return
+    for dest in destinations:
+        if not dest.get("enabled", True):
+            continue
+        guild_id = str(dest["guild_id"])
+        _post_bot_message(
+            str(dest["channel_id"]),
+            {"embeds": [digest_embed]},
+            f"digest:{guild_id}",
+        )

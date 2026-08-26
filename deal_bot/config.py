@@ -62,6 +62,14 @@ SHADOW_QUALITY_SCORER_WEBHOOK_URL = os.environ.get("SHADOW_QUALITY_SCORER_WEBHOO
 SHADOW_CATEGORIZER_WEBHOOK_URL = os.environ.get("SHADOW_CATEGORIZER_WEBHOOK_URL", "")
 
 # ---------------------------------------------------------------------------
+# Native Discord bot (always-on service). When guilds have /setup, the
+# pipeline delivers via channel messages instead of source webhooks.
+# ---------------------------------------------------------------------------
+DISCORD_BOT_TOKEN = os.environ.get("DISCORD_BOT_TOKEN", "")
+DISCORD_BOT_OWNER_ID = os.environ.get("DISCORD_BOT_OWNER_ID", "")
+BOT_RUN_INTERVAL_SECONDS = int(os.environ.get("BOT_RUN_INTERVAL_SECONDS", "14400"))
+
+# ---------------------------------------------------------------------------
 # Bluesky — free API, no approval process. Only standout deals auto-post
 # here (see BLUESKY_MIN_DISCOUNT_PERCENT below), and even among those,
 # only the top BLUESKY_MAX_POSTS_PER_RUN by $ saved actually go out — to

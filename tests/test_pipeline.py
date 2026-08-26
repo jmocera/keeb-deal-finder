@@ -44,8 +44,9 @@ class RunOnceBailTests(unittest.TestCase):
 
     @patch("deal_bot.pipeline.time.sleep")
     @patch("deal_bot.pipeline.load_seen", return_value={})
+    @patch("deal_bot.pipeline.load_guild_destinations", return_value=[])
     @patch("deal_bot.pipeline.log_run")
-    def test_empty_seen_proceeds_to_feeds(self, mock_log, mock_load, mock_sleep):
+    def test_empty_seen_proceeds_to_feeds(self, mock_log, mock_guilds, mock_load, mock_sleep):
         # {} means "no Supabase config / nothing seen" — not a failure, so the
         # run proceeds to fetching feeds. time.sleep is mocked so the per-feed
         # rate-limit sleeps don't slow the test.
@@ -58,6 +59,19 @@ class RunOnceBailTests(unittest.TestCase):
             pipeline.run_once()
 
         self.assertEqual(mock_log.call_count, 1)  # a normal completion log_run
+
+    @patch("deal_bot.pipeline.load_seen", return_value={})
+    @patch("deal_bot.pipeline.load_guild_destinations", return_value=None)
+    @patch("deal_bot.pipeline.log_run")
+    def test_load_guilds_none_bails_and_logs(self, mock_log, mock_guilds, mock_load):
+        with patch("deal_bot.pipeline.fetch_woot_feed") as mock_woot, \
+             patch("deal_bot.pipeline.fetch_all_shopify_stores") as mock_shopify:
+            pipeline.run_once()
+
+        mock_woot.assert_not_called()
+        mock_shopify.assert_not_called()
+        self.assertEqual(mock_log.call_count, 1)
+        self.assertIn("load_guild_destinations failed", mock_log.call_args.kwargs["error"])
 
 
 class SkipReasonTests(unittest.TestCase):

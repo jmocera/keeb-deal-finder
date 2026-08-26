@@ -88,3 +88,56 @@ create table if not exists posted_deals (
   list_price numeric,
   posted_at timestamptz default now()
 );
+
+-- ==========================================================================
+-- guild_destinations — per-guild delivery target configured by /setup.
+-- One row per Discord guild. enabled=false after /disable. The first
+-- pipeline run after /setup seeds current candidates into guild_deal_posts
+-- and sets initial_sync_complete=true without posting (no flood).
+-- ==========================================================================
+create table if not exists guild_destinations (
+  guild_id text primary key,
+  channel_id text not null,
+  enabled boolean not null default true,
+  initial_sync_complete boolean not null default false,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+comment on column guild_destinations.guild_id is
+  'Discord guild snowflake, stored as text to avoid JSON integer precision loss.';
+comment on column guild_destinations.channel_id is
+  'Discord text-channel snowflake that receives native bot deal messages.';
+comment on column guild_destinations.enabled is
+  'true after /setup; false after /disable. load_guild_destinations returns only enabled rows.';
+comment on column guild_destinations.initial_sync_complete is
+  'false until the first pipeline run after /setup seeds current candidates as already-posted. New deals start on the NEXT run.';
+comment on column guild_destinations.created_at is
+  'Row insert time (UTC).';
+comment on column guild_destinations.updated_at is
+  'Last /setup, /disable, or initial-sync mark (UTC).';
+
+-- ==========================================================================
+-- guild_deal_posts — per-guild delivery dedupe. Composite PK so each
+-- guild receives each deal_id at most once. Independent of seen_deals
+-- (quality gates) and posted_deals (weekly digest).
+-- ==========================================================================
+create table if not exists guild_deal_posts (
+  guild_id text not null,
+  deal_id text not null,
+  sale_price numeric,
+  posted_at timestamptz not null default now(),
+  primary key (guild_id, deal_id)
+);
+
+comment on column guild_deal_posts.guild_id is
+  'Discord guild snowflake (text). Part of composite PK with deal_id.';
+comment on column guild_deal_posts.deal_id is
+  'Deal id from sources (e.g. woot:sku). Same identifier as seen_deals.id.';
+comment on column guild_deal_posts.sale_price is
+  'Sale price at the moment of successful delivery (or initial-sync seed).';
+comment on column guild_deal_posts.posted_at is
+  'UTC timestamp of the successful native-bot delivery or baseline seed.';
+
+create index if not exists guild_deal_posts_guild_id_idx
+  on guild_deal_posts (guild_id);
