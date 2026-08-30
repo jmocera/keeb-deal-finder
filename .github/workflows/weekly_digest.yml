@@ -30,6 +30,7 @@ jobs:
         run: python -m deal_bot.weekly_digest ${{ github.event_name == 'workflow_dispatch' && inputs.no_bluesky && '--no-bluesky' || '' }}
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
           SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
           DIGEST_WEBHOOK_URL: ${{ secrets.DIGEST_WEBHOOK_URL }}
           BLUESKY_HANDLE: ${{ secrets.BLUESKY_HANDLE }}

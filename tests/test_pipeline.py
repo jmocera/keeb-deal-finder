@@ -194,25 +194,29 @@ class BatchSpecExtractionTests(unittest.TestCase):
         self.assertEqual(result[1]["specs"], [])
 
     @patch("deal_bot.ai.spec_extraction._call_openrouter")
-    def test_wrong_item_count_falls_back_per_item(self, mock_call):
-        # Batch returns only 1 item for 2 titles -> fall back to per-item
+    def test_wrong_item_count_fails_open_deterministically(self, mock_call):
+        # Wrong item count from BOTH models -> deterministic raw-title
+        # defaults. No per-item fan-out: exactly two batch calls.
         mock_call.side_effect = [
-            '{"items": [{"clean_title": "Only", "specs": []}]}',  # batch attempt
-            '{"clean_title": "A Real", "specs": []}',  # per-item 1
-            '{"clean_title": "B Real", "specs": []}',  # per-item 2
+            '{"items": [{"clean_title": "Only", "specs": []}]}',  # primary
+            '{"items": [{"clean_title": "Still", "specs": []}]}',  # fallback
         ]
         result = spec_extraction.extract_clean_specs_batch(["A", "B"])
-        self.assertEqual(result[0]["clean_title"], "A Real")
-        self.assertEqual(result[1]["clean_title"], "B Real")
+        self.assertEqual(
+            result,
+            [{"clean_title": "A", "specs": []}, {"clean_title": "B", "specs": []}],
+        )
+        self.assertEqual(mock_call.call_count, 2)
 
     @patch("deal_bot.ai.spec_extraction._call_openrouter")
-    def test_invalid_item_type_falls_back_per_item(self, mock_call):
+    def test_invalid_item_type_fails_open_deterministically(self, mock_call):
         mock_call.side_effect = [
-            '{"items": "not-a-list"}',  # batch attempt
-            '{"clean_title": "A Real", "specs": []}',  # per-item
+            '{"items": "not-a-list"}',  # primary
+            '{"items": ["not-a-dict"]}',  # fallback: right count, wrong shape
         ]
         result = spec_extraction.extract_clean_specs_batch(["A"])
-        self.assertEqual(result[0]["clean_title"], "A Real")
+        self.assertEqual(result, [{"clean_title": "A", "specs": []}])
+        self.assertEqual(mock_call.call_count, 2)
 
 
 class BatchAnalysisTests(unittest.TestCase):

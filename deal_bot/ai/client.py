@@ -14,18 +14,27 @@ def _call_openrouter(
     model: str, system_prompt: str, user_prompt: str,
     *, temperature: float = 0.8, max_tokens: int = 350,
     reasoning: dict | None = None, response_format: dict | None = None,
+    provider: dict | None = None,
     timeout: int = 20,
 ) -> str | None:
     """One chat-completions call, failing open (returns None) on any problem.
 
     `user_prompt` can be a plain string or a list of OpenRouter content
     blocks (for multimodel/vision calls), matching the wire format of the
-    `"content"` field. `reasoning` and `response_format` are opt-in per
-    call, not defaulted — different models on OpenRouter behave oppositely
-    here (see HANDOFF.md bugs #7/#8): some reasoning-capable models burn
-    their whole token budget on internal reasoning unless `effort` is set;
-    others break if *any* effort is set. So every caller states explicitly
-    what it needs rather than this function guessing for all models.
+    `"content"` field. `reasoning`, `response_format`, and `provider` are
+    opt-in per call, not defaulted — different models on OpenRouter behave
+    oppositely here (see HANDOFF.md bugs #7/#8): some reasoning-capable
+    models burn their whole token budget on internal reasoning unless
+    `effort` is set; others break if *any* effort is set. So every caller
+    states explicitly what it needs rather than this function guessing for
+    all models.
+
+    Whenever structured output (`response_format`) is requested, the
+    provider is required to support the requested parameters via
+    `provider: {"require_parameters": true}` — otherwise OpenRouter may
+    silently route the request to a provider that ignores response_format
+    entirely. Callers can override `provider` explicitly; nobody has to
+    hard-code the require_parameters routing themselves.
 
     Transient failures (network blips, 429/5xx) are retried by the shared
     transport; this still fails open (returns None) after that, so the
@@ -46,6 +55,10 @@ def _call_openrouter(
         payload["reasoning"] = reasoning
     if response_format is not None:
         payload["response_format"] = response_format
+        if provider is None:
+            provider = {"require_parameters": True}
+    if provider is not None:
+        payload["provider"] = provider
 
     headers = {
         "Authorization": f"Bearer {config.OPENROUTER_API_KEY}",
@@ -82,6 +95,16 @@ def _call_openrouter(
     # single wrapping pair if present rather than rejecting the whole thing.
     content = content.strip('"').strip("'").strip()
     return content or None
+
+
+def _strict_json_response_format(name: str, schema: dict) -> dict:
+    """Strict json_schema structured-output request: the provider must emit
+    JSON matching `schema` exactly (all properties required, no extras), or
+    the request fails rather than returning loose prose to parse."""
+    return {
+        "type": "json_schema",
+        "json_schema": {"name": name, "strict": True, "schema": schema},
+    }
 
 
 # Public alias for consumers OUTSIDE the deal_bot package (e.g. the

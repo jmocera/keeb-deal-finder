@@ -1,9 +1,9 @@
 """Tests for the consolidated caption+analysis verdict batch (verdicts.py).
 
 Every LLM call is mocked at the module boundary — no real OpenRouter
-traffic. The fallback contract under test: a degraded batch never
-produces worse output than the previous two-module behavior (per-deal
-LLM caption chain ending in the mechanical template; empty analysis).
+traffic. The fallback contract under test: a degraded batch NEVER fans out
+into per-deal AI calls — bad captions/analyses and whole-batch failures all
+land on the deterministic mechanical template + empty analysis.
 """
 import sys
 import unittest
@@ -64,27 +64,30 @@ class VerdictBatchTests(unittest.TestCase):
 
     @patch("deal_bot.ai.captions._call_openrouter", return_value=None)
     @patch.object(verdicts, "_call_openrouter")
-    def test_wrong_count_falls_back_per_item(self, mock_verdict_call, _):
-        # Both models return a wrong-count batch; per-item validation then
-        # runs for every deal and (with the caption chain's own LLM calls
-        # mocked to None) lands on the mechanical template.
+    def test_wrong_count_falls_back_deterministically(self, mock_verdict_call, mock_caption_chain):
+        # Both models return a wrong-count batch -> deterministic mechanical
+        # captions + empty analysis. The per-deal caption chain (a per-deal
+        # LLM call) must NEVER run — that was the retry-storm fan-out.
         mock_verdict_call.return_value = '{"items": []}'
         result = verdicts.build_verdicts_batch([_deal(), _deal(id="woot:2")])
         self.assertEqual(len(result), 2)
         self.assertTrue(all(r["analysis"] == "" for r in result))
         self.assertTrue(all(r["caption"] for r in result))  # template bodies
+        self.assertEqual(mock_verdict_call.call_count, 2)  # primary + fallback only
+        mock_caption_chain.assert_not_called()
 
     @patch("deal_bot.ai.captions._call_openrouter", return_value=None)
     @patch.object(verdicts, "_call_openrouter")
-    def test_unparseable_batch_falls_back_per_item(self, mock_verdict_call, _):
+    def test_unparseable_batch_falls_back_deterministically(self, mock_verdict_call, mock_caption_chain):
         mock_verdict_call.return_value = "complete garbage not json"
         result = verdicts.build_verdicts_batch([_deal()])
         self.assertTrue(result[0]["caption"])
         self.assertEqual(result[0]["analysis"], "")
+        mock_caption_chain.assert_not_called()
 
     @patch("deal_bot.ai.captions._call_openrouter", return_value=None)
     @patch.object(verdicts, "_call_openrouter")
-    def test_overbudget_caption_falls_back_but_keeps_valid_analysis(self, mock_verdict_call, _):
+    def test_overbudget_caption_falls_back_but_keeps_valid_analysis(self, mock_verdict_call, mock_caption_chain):
         budget = verdicts.caption_budget(_deal()["url"])
         bad_caption = "x" * (budget + 50)
         mock_verdict_call.return_value = (
@@ -95,6 +98,7 @@ class VerdictBatchTests(unittest.TestCase):
         self.assertNotEqual(result[0]["caption"], bad_caption)  # fell back
         self.assertLessEqual(len(result[0]["caption"]), budget)
         self.assertEqual(result[0]["analysis"], "Valid analysis text.")  # kept independently
+        mock_caption_chain.assert_not_called()  # mechanical, not a per-deal AI call
 
     @patch("deal_bot.ai.captions._call_openrouter", return_value=None)
     @patch.object(verdicts, "_call_openrouter")

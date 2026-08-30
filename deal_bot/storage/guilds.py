@@ -25,7 +25,7 @@ def load_guild_destinations() -> list[dict] | None:
     fatal (same shape as load_seen) so a half-loaded destination list
     cannot silently drop guilds for a run.
     """
-    if not config.SUPABASE_URL or not config.SUPABASE_SERVICE_KEY:
+    if not config.SUPABASE_URL or not config.get_supabase_key():
         return []
     url = (
         f"{config.SUPABASE_URL}/rest/v1/guild_destinations"
@@ -53,7 +53,7 @@ def load_guild_destinations() -> list[dict] | None:
 def upsert_guild_destination(guild_id, channel_id) -> None:
     """/setup — enable this guild and reset initial_sync_complete so the
     next pipeline run seeds the current candidate list as baseline."""
-    if not config.SUPABASE_URL or not config.SUPABASE_SERVICE_KEY:
+    if not config.SUPABASE_URL or not config.get_supabase_key():
         print("[guilds] no Supabase config — cannot upsert destination")
         return
     url = f"{config.SUPABASE_URL}/rest/v1/guild_destinations"
@@ -77,7 +77,7 @@ def upsert_guild_destination(guild_id, channel_id) -> None:
 
 def disable_guild_destination(guild_id) -> None:
     """/disable — stop delivering to this guild. Row is kept so /setup can re-enable."""
-    if not config.SUPABASE_URL or not config.SUPABASE_SERVICE_KEY:
+    if not config.SUPABASE_URL or not config.get_supabase_key():
         print("[guilds] no Supabase config — cannot disable destination")
         return
     url = f"{config.SUPABASE_URL}/rest/v1/guild_destinations"
@@ -97,7 +97,7 @@ def disable_guild_destination(guild_id) -> None:
 
 def mark_initial_sync_complete(guild_id) -> None:
     """Called after the first run's baseline seed succeeds for this guild."""
-    if not config.SUPABASE_URL or not config.SUPABASE_SERVICE_KEY:
+    if not config.SUPABASE_URL or not config.get_supabase_key():
         return
     url = f"{config.SUPABASE_URL}/rest/v1/guild_destinations"
     headers = _supabase_headers()
@@ -120,7 +120,7 @@ def load_guild_posted_ids(guild_id) -> set[str]:
     Returns set() on no-config, no-rows, network failure, or non-200.
     Paginates at 1000 (Supabase PostgREST default max-rows).
     """
-    if not config.SUPABASE_URL or not config.SUPABASE_SERVICE_KEY:
+    if not config.SUPABASE_URL or not config.get_supabase_key():
         return set()
     url = f"{config.SUPABASE_URL}/rest/v1/guild_deal_posts"
     posted: set[str] = set()
@@ -157,7 +157,7 @@ def record_guild_post(guild_id, deal_id, sale_price) -> bool:
     seed must not mark sync complete if it could not persist). Failures
     print and never raise.
     """
-    if not config.SUPABASE_URL or not config.SUPABASE_SERVICE_KEY:
+    if not config.SUPABASE_URL or not config.get_supabase_key():
         print("[guilds] no Supabase config — cannot record guild post")
         return False
     url = f"{config.SUPABASE_URL}/rest/v1/guild_deal_posts?on_conflict=guild_id,deal_id"

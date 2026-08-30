@@ -95,13 +95,13 @@ class ScoreDealsTests(unittest.TestCase):
         self.assertIn("Deal 2", sent_user_prompt)
 
     @patch("deal_bot.ai.deal_scorer._call_openrouter")
-    def test_reasoning_is_omitted_for_gemma(self, mock_call):
-        # Empirical finding: Gemma 4 26B burns its token budget when any
-        # reasoning effort is set. Lock that in so it isn't silently
-        # reintroduced — the opposite of the caption/classifier models.
-        mock_call.return_value = "9"
+    def test_reasoning_is_explicitly_disabled(self, mock_call):
+        # Reasoning-capable models burn their token budget on the reasoning
+        # trace and truncate the JSON (the observed 10-of-73 failure). Lock
+        # in the explicit disable so it isn't silently reintroduced.
+        mock_call.return_value = '{"items": [9]}'
         deal_scorer.score_deals([_make_deal(1)])
-        self.assertNotIn("reasoning", mock_call.call_args.kwargs)
+        self.assertEqual(mock_call.call_args.kwargs.get("reasoning"), {"enabled": False})
 
 
 class LenientParseTests(unittest.TestCase):

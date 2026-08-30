@@ -3,12 +3,45 @@
 One batched OpenRouter call per run tagging each deal into a fine-grained
 category (board/switch/keycaps/accessory/other), which could later drive
 per-category Discord channels or better hashtag/analysis targeting.
+
+Bounded batch, same pattern as spec_extraction/verdicts/classifier: strict
+json_schema structured output, at most ONE call per model (primary, then
+fallback — deduped when both slots name the same model), each response
+validated inside the model loop by _parse_categories_json for parse, shape,
+and EXACT item cardinality. A degraded batch never fans out into per-item
+calls; total failure returns an empty map and omits the shadow report
+(fail-open).
+
+Token budget: sized from the schema's realistic per-item maximum (the
+longest enum token "accessory" with JSON syntax ≈ 8 output tokens; 16/item
+with 2x margin) and a fixed ~200-token JSON-scaffolding overhead — with NO
+artificial cap. The old min(1000, ...) cap could not hold a 124-item run.
+Chunking is deliberately unnecessary: the worst realistic batch (124
+items) needs ≈ 2.2K output tokens, far below provider output ceilings.
 """
 
 import json
 
 from deal_bot import config
-from deal_bot.ai.client import _call_openrouter
+from deal_bot.ai.client import _call_openrouter, _strict_json_response_format
+
+# Strict structured-output schema: exactly one valid category per item.
+_CATEGORIZER_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "categories": {
+            "type": "array",
+            "items": {"type": "string", "enum": list(config.DEAL_CATEGORIES)},
+        },
+    },
+    "required": ["categories"],
+    "additionalProperties": False,
+}
+
+# Per-item output-token derivation: '"accessory",' + newline ≈ 8 tokens
+# (longest enum token); 2x margin.
+_CATEGORIZER_TOKENS_PER_ITEM = 16
+_CATEGORIZER_TOKEN_OVERHEAD = 200
 
 
 def _parse_categories_json(response: str | None, n: int, valid: set[str]) -> list[str] | None:
@@ -85,16 +118,25 @@ def categorize_deals(deals: list[dict]) -> tuple[dict[str, str], str | None]:
         for i, d in enumerate(deals, start=1)
     ]
     user_prompt = "\n".join(lines)
-    max_tokens = min(1000, 200 + len(deals) * 15)
+    max_tokens = _CATEGORIZER_TOKEN_OVERHEAD + len(deals) * _CATEGORIZER_TOKENS_PER_ITEM
 
     valid = set(config.DEAL_CATEGORIES)
-    for model in (config.OPENROUTER_CATEGORIZER_MODEL, config.OPENROUTER_CATEGORIZER_FALLBACK_MODEL):
+    # Dedupe while preserving order: an operator pointing both chain slots
+    # at the same model must not get charged two identical calls.
+    models = list(dict.fromkeys((
+        config.OPENROUTER_CATEGORIZER_MODEL,
+        config.OPENROUTER_CATEGORIZER_FALLBACK_MODEL,
+    )))
+    for model in models:
         response = _call_openrouter(
             model, config.OPENROUTER_CATEGORIZER_SYSTEM_PROMPT, user_prompt,
             temperature=0.1, max_tokens=max_tokens,
-            response_format={"type": "json_object"},
-            # reasoning omitted: Gemma burns its token budget on reasoning
-            # when any effort is set (see ai/deal_scorer.py).
+            # Explicitly disabled (not merely omitted): reasoning-capable
+            # models burn their token budget on the reasoning trace and
+            # truncate the JSON (see ai/deal_scorer.py).
+            reasoning={"enabled": False},
+            response_format=_strict_json_response_format(
+                "category_tagger", _CATEGORIZER_SCHEMA),
         )
         if not response:
             continue

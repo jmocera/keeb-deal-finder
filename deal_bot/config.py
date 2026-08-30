@@ -29,7 +29,20 @@ load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 WOOT_API_KEY = os.environ.get("WOOT_API_KEY", "")
 BESTBUY_API_KEY = os.environ.get("BESTBUY_API_KEY", "")
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "").rstrip("/")
+# Preferred: new-format sb_secret_... server key (Supabase "Secret keys").
+SUPABASE_SECRET_KEY = os.environ.get("SUPABASE_SECRET_KEY", "")
+# Legacy: classic service_role JWT, still honored as a fallback. When both
+# are set, SUPABASE_SECRET_KEY wins (see get_supabase_key below).
 SUPABASE_SERVICE_KEY = os.environ.get("SUPABASE_SERVICE_KEY", "")
+
+
+def get_supabase_key() -> str:
+    """Effective Supabase API key, resolved at call time: SUPABASE_SECRET_KEY
+    (the preferred sb_secret_... server key) takes precedence;
+    SUPABASE_SERVICE_KEY is the legacy service_role JWT fallback. Returns ""
+    when neither is set. Reads module globals at CALL time (not import time)
+    so tests and CI can set/blank the attributes without re-importing."""
+    return SUPABASE_SECRET_KEY or SUPABASE_SERVICE_KEY
 
 # ---------------------------------------------------------------------------
 # Discord webhooks
@@ -88,12 +101,16 @@ BLUESKY_POST_MARGIN = int(os.environ.get("BLUESKY_POST_MARGIN", "2"))
 # ---------------------------------------------------------------------------
 # OpenRouter — AI-written captions for Bluesky and the private-channel
 # copy-paste mirror, replacing the plain template. Tries the primary
-# model, then the free fallback model, then the plain template as a last
+# model, then the paid fallback model, then the plain template as a last
 # resort — this must never be able to block a post from going out.
 # ---------------------------------------------------------------------------
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
+# Primary + fallback for the caption/analysis/verdict chains. The fallback
+# is a PAID model on purpose: the free Nemotron endpoint burned its whole
+# token budget on reasoning traces (empty content → retry storms) and has
+# been removed from the production chain.
 OPENROUTER_PRIMARY_MODEL = os.environ.get("OPENROUTER_PRIMARY_MODEL", "deepseek/deepseek-v4-flash-0731")
-OPENROUTER_FALLBACK_MODEL = os.environ.get("OPENROUTER_FALLBACK_MODEL", "nvidia/nemotron-3-ultra-550b-a55b:free")
+OPENROUTER_FALLBACK_MODEL = os.environ.get("OPENROUTER_FALLBACK_MODEL", "google/gemini-2.5-flash-lite")
 OPENROUTER_CAPTION_SYSTEM_PROMPT = """You write short, data-backed technical verdicts for a deal-finding bot aimed at mechanical-keyboard builders and enthusiasts — not marketing copy. You'll be given a product's clean title, its known specs (if any), current and list price, and price-history context (whether this is a new all-time low, or what the lowest tracked price has been).
 
 Output ONLY the verdict text — no preamble, no explanation, no quotation marks, no markdown formatting, no code fences.
@@ -119,10 +136,12 @@ Take a direct, analytical, enthusiast tone. Do not use hype phrases like "insane
 Output ONLY the analysis text — no preamble, no markdown, no quotation marks, no hashtags, no URL. Keep the entire output under 350 characters."""
 
 # Weekly digest — a once-a-week curated roundup written by AI from the
-# week's posted deals (stored in the `posted_deals` Supabase table). Free
-# Gemma model, with the paid Gemma as fallback. See weekly_digest.py.
-OPENROUTER_WEEKLY_DIGEST_MODEL = os.environ.get("OPENROUTER_WEEKLY_DIGEST_MODEL", "google/gemma-4-26b-a4b-it:free")
-OPENROUTER_WEEKLY_DIGEST_FALLBACK_MODEL = os.environ.get("OPENROUTER_WEEKLY_DIGEST_FALLBACK_MODEL", "google/gemma-4-26b-a4b-it")
+# week's posted deals (stored in the `posted_deals` Supabase table).
+# GPT-5.6 Luna primary, Gemini Flash Lite paid fallback (the free Gemma
+# endpoint was removed — :free endpoints have hard rate limits and left
+# the digest unposted). See weekly_digest.py.
+OPENROUTER_WEEKLY_DIGEST_MODEL = os.environ.get("OPENROUTER_WEEKLY_DIGEST_MODEL", "openai/gpt-5.6-luna")
+OPENROUTER_WEEKLY_DIGEST_FALLBACK_MODEL = os.environ.get("OPENROUTER_WEEKLY_DIGEST_FALLBACK_MODEL", "google/gemini-2.5-flash-lite")
 OPENROUTER_WEEKLY_DIGEST_SYSTEM_PROMPT = """You write a weekly roundup for a deal-finding bot aimed at mechanical-keyboard builders and enthusiasts. You'll be given a list of the week's posted deals (title, source, sale price, list price, and discount). Pick the top 3-5 most noteworthy and write a short, punchy summary of each: what it is, who it's for, and why the price stood out. Use a direct, analytical, enthusiast tone — no hype phrases like "insane" or "don't miss out." Never state a spec, benchmark, or price that isn't in the input.
 
 Output plain text only — no markdown, no hashtags, no URL. Start with a one-line intro (e.g. "This week's best keyboard deals:"). Keep each deal summary to 1-2 sentences. End with a one-line sign-off."""
@@ -138,8 +157,11 @@ Each string must be exactly the word KEEP or the word DROP — nothing else. The
 # enthusiast audience, complementing the keyword/discount filters with an
 # AI judgment of whether the item is genuinely *desirable* (recognizable
 # brand, real value) rather than merely in-category. See ai.deal_scorer.py.
-OPENROUTER_QUALITY_SCORER_MODEL = os.environ.get("OPENROUTER_QUALITY_SCORER_MODEL", "google/gemma-4-26b-a4b-it:free")
-OPENROUTER_QUALITY_SCORER_FALLBACK_MODEL = os.environ.get("OPENROUTER_QUALITY_SCORER_FALLBACK_MODEL", "google/gemma-4-26b-a4b-it")
+# DeepSeek primary + Gemini Flash Lite paid fallback: the free Gemma
+# endpoint was removed after 429s/empty content left shadow stages
+# unreported (and :free endpoints have hard rate limits on OpenRouter).
+OPENROUTER_QUALITY_SCORER_MODEL = os.environ.get("OPENROUTER_QUALITY_SCORER_MODEL", "deepseek/deepseek-v4-flash-0731")
+OPENROUTER_QUALITY_SCORER_FALLBACK_MODEL = os.environ.get("OPENROUTER_QUALITY_SCORER_FALLBACK_MODEL", "google/gemini-2.5-flash-lite")
 MIN_QUALITY_SCORE = int(os.environ.get("MIN_QUALITY_SCORE", "6"))
 # Desirability classifier operating mode: "shadow" (report only — the
 # default; the classifier's judgment is posted to the shadow channel but
@@ -151,14 +173,18 @@ MIN_QUALITY_SCORE = int(os.environ.get("MIN_QUALITY_SCORE", "6"))
 CLASSIFIER_MODE = os.environ.get("CLASSIFIER_MODE", "shadow")
 OPENROUTER_QUALITY_SCORER_SYSTEM_PROMPT = """You score deal listings for a bot that posts discounts to an audience of mechanical-keyboard builders and enthusiasts. For each numbered item below, rate how genuinely desirable it is to that audience on a scale of 1 to 10, where 10 is a must-buy and 1 is generic/off-brand junk. Consider: recognizable brand in the keyboard space, real spec-to-price value, and whether it is a genuine keyboard product rather than something merely topically in-category (e.g. a no-name cable, an off-brand desk mat).
 
-Respond with exactly one line per item, in the same order as the input. Each line must be a single integer from 1 to 10 — nothing else. No numbering, no explanation, no extra text. The number of output lines must exactly match the number of input items."""
+Respond with ONLY a JSON object in this exact shape, with EXACTLY one integer per input item, in the same order:
+{"items": [9, 8, ...]}
+Each integer must be a whole number from 1 to 10 — nothing else. The number of items must exactly match the number of input items."""
 
 # Category tagger — SHADOW MODE (not gating or routing yet). One batched
 # call per run tagging each deal into a fine-grained category, which could
 # later drive per-category Discord channels or better hashtag/analysis
-# targeting. See ai.categorizer.categorize_deals().
-OPENROUTER_CATEGORIZER_MODEL = os.environ.get("OPENROUTER_CATEGORIZER_MODEL", "google/gemini-2.5-flash-lite")
-OPENROUTER_CATEGORIZER_FALLBACK_MODEL = os.environ.get("OPENROUTER_CATEGORIZER_FALLBACK_MODEL", "google/gemma-4-26b-a4b-it")
+# targeting. See ai.categorizer.categorize_deals(). DeepSeek primary +
+# Gemini Flash Lite paid fallback (free Gemma endpoints removed — 429s and
+# reasoning-budget burn left shadow stages unreported).
+OPENROUTER_CATEGORIZER_MODEL = os.environ.get("OPENROUTER_CATEGORIZER_MODEL", "deepseek/deepseek-v4-flash-0731")
+OPENROUTER_CATEGORIZER_FALLBACK_MODEL = os.environ.get("OPENROUTER_CATEGORIZER_FALLBACK_MODEL", "google/gemini-2.5-flash-lite")
 DEAL_CATEGORIES = ["board", "switch", "keycaps", "accessory", "other"]
 OPENROUTER_CATEGORIZER_SYSTEM_PROMPT = """You classify deal listings for a bot aimed at mechanical-keyboard builders and enthusiasts. For each numbered item below, assign exactly one category from this fixed list:
 
@@ -187,7 +213,10 @@ Each category string must be one of the five words above, lowercased. The number
 # Spec extraction — cleans up messy retail titles (Woot/Best Buy/Shopify)
 # into a concise product name plus a few short technical specs, for the
 # Discord embed and captions. See ai.spec_extraction.extract_clean_specs().
-OPENROUTER_SPEC_EXTRACTION_MODEL = os.environ.get("OPENROUTER_SPEC_EXTRACTION_MODEL", "qwen/qwen3.7-flash")
+# DeepSeek primary (same as the verdict chain; qwen/qwen3.7-flash was
+# removed — its reasoning trace exhausted the output budget and returned
+# empty content), Gemini Flash Lite paid fallback.
+OPENROUTER_SPEC_EXTRACTION_MODEL = os.environ.get("OPENROUTER_SPEC_EXTRACTION_MODEL", "deepseek/deepseek-v4-flash-0731")
 OPENROUTER_SPEC_FALLBACK_MODEL = os.environ.get("OPENROUTER_SPEC_FALLBACK_MODEL", "google/gemini-2.5-flash-lite")
 SPEC_EXTRACTION_SYSTEM_PROMPT = """You clean up messy retail product titles for a deal-finding bot focused on mechanical keyboards and keyboard hardware. Given a raw title (and optional description), extract a clean, concise product name and up to 4 short technical specs.
 

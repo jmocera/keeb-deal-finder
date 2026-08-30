@@ -31,6 +31,7 @@ class FetchLastRunTests(unittest.TestCase):
     def test_network_failure_returns_none(self, mock_req):
         mock_req.return_value = None
         with patch.object(config, "SUPABASE_URL", "https://x.supabase.co"), \
+             patch.object(config, "SUPABASE_SECRET_KEY", ""), \
              patch.object(config, "SUPABASE_SERVICE_KEY", "k"):
             self.assertIsNone(watchdog.fetch_last_run())
 
@@ -38,6 +39,7 @@ class FetchLastRunTests(unittest.TestCase):
     def test_no_rows_returns_none(self, mock_req):
         mock_req.return_value = _resp(200, [])
         with patch.object(config, "SUPABASE_URL", "https://x.supabase.co"), \
+             patch.object(config, "SUPABASE_SECRET_KEY", ""), \
              patch.object(config, "SUPABASE_SERVICE_KEY", "k"):
             self.assertIsNone(watchdog.fetch_last_run())
 
@@ -45,6 +47,7 @@ class FetchLastRunTests(unittest.TestCase):
     def test_parses_ran_at(self, mock_req):
         mock_req.return_value = _resp(200, [{"ran_at": "2026-08-21T10:00:00+00:00"}])
         with patch.object(config, "SUPABASE_URL", "https://x.supabase.co"), \
+             patch.object(config, "SUPABASE_SECRET_KEY", ""), \
              patch.object(config, "SUPABASE_SERVICE_KEY", "k"):
             dt = watchdog.fetch_last_run()
         self.assertIsNotNone(dt)
@@ -53,6 +56,7 @@ class FetchLastRunTests(unittest.TestCase):
     def test_orders_by_ran_at_desc(self, mock_req):
         mock_req.return_value = _resp(200, [{"ran_at": "2026-08-21T10:00:00+00:00"}])
         with patch.object(config, "SUPABASE_URL", "https://x.supabase.co"), \
+             patch.object(config, "SUPABASE_SECRET_KEY", ""), \
              patch.object(config, "SUPABASE_SERVICE_KEY", "k"):
             watchdog.fetch_last_run()
         self.assertEqual(mock_req.call_args.kwargs["params"]["order"], "ran_at.desc")
@@ -73,21 +77,27 @@ class RunIsStaleTests(unittest.TestCase):
 
 
 class RunWatchdogTests(unittest.TestCase):
+    _KEYS = ("SUPABASE_URL", "SUPABASE_SECRET_KEY", "SUPABASE_SERVICE_KEY")
+
     def setUp(self):
         # Pin Supabase config so run_watchdog's no-config gate passes
         # deterministically regardless of the local .env — the individual
-        # tests then control behavior via the mocked fetch_last_run.
-        self._orig = (config.SUPABASE_URL, config.SUPABASE_SERVICE_KEY)
+        # tests then control behavior via the mocked fetch_last_run. BOTH
+        # key attributes are saved and the new one blanked.
+        self._orig = {k: getattr(config, k) for k in self._KEYS}
         config.SUPABASE_URL = "https://x.supabase.co"
+        config.SUPABASE_SECRET_KEY = ""
         config.SUPABASE_SERVICE_KEY = "k"
 
     def tearDown(self):
-        (config.SUPABASE_URL, config.SUPABASE_SERVICE_KEY) = self._orig
+        for k, v in self._orig.items():
+            setattr(config, k, v)
 
     def test_no_config_skips_alert_without_fetching(self):
         # No Supabase config = the watchdog can't know anything; it must
         # NOT post a false "no run in 6h" alarm, and must not touch the DB.
         with patch.object(config, "SUPABASE_URL", ""), \
+             patch.object(config, "SUPABASE_SECRET_KEY", ""), \
              patch.object(config, "SUPABASE_SERVICE_KEY", ""), \
              patch("deal_bot.watchdog.fetch_last_run") as mock_fetch, \
              patch("deal_bot.watchdog._post_webhook") as mock_webhook:

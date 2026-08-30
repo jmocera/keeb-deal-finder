@@ -216,12 +216,12 @@ free-tier fallback).
 
 - `OPENROUTER_API_KEY` — secret.
 - `OPENROUTER_PRIMARY_MODEL` — variable, currently `deepseek/deepseek-v4-flash-0731` (paid, very cheap: $0.09/M prompt, $0.18/M completion tokens). Used for caption verdicts, the deal analyst, and the desirability classifier.
-- `OPENROUTER_FALLBACK_MODEL` — variable, currently `nvidia/nemotron-3-ultra-550b-a55b:free` (caption/classifier/analyst free fallback).
-- `OPENROUTER_SPEC_EXTRACTION_MODEL` — variable, currently `qwen/qwen3.7-flash` ($0.03/$0.13 per M).
+- `OPENROUTER_FALLBACK_MODEL` — variable, currently `google/gemini-2.5-flash-lite` (caption/classifier/analyst paid fallback; the free Nemotron endpoint was removed after reasoning-budget burn caused empty content and retry storms).
+- `OPENROUTER_SPEC_EXTRACTION_MODEL` — variable, currently `deepseek/deepseek-v4-flash-0731` (qwen/qwen3.7-flash removed after reasoning-budget burn returned empty content and fanned out per-item calls).
 - `OPENROUTER_SPEC_FALLBACK_MODEL` — variable, currently `google/gemini-2.5-flash-lite` (spec-extraction fallback, only called when the primary fails).
-- `OPENROUTER_QUALITY_SCORER_MODEL` / `OPENROUTER_QUALITY_SCORER_FALLBACK_MODEL` — variables, `google/gemma-4-26b-a4b-it:free` and the paid `google/gemma-4-26b-a4b-it`. Used by the deal quality scorer.
-- `OPENROUTER_CATEGORIZER_MODEL` / `OPENROUTER_CATEGORIZER_FALLBACK_MODEL` — same Gemma pair, used by the category tagger.
-- `OPENROUTER_WEEKLY_DIGEST_MODEL` / `OPENROUTER_WEEKLY_DIGEST_FALLBACK_MODEL` — same Gemma pair, used by the weekly digest.
+- `OPENROUTER_QUALITY_SCORER_MODEL` / `OPENROUTER_QUALITY_SCORER_FALLBACK_MODEL` — variables, `deepseek/deepseek-v4-flash-0731` and `google/gemini-2.5-flash-lite`. Used by the deal quality scorer (free Gemma endpoints removed — 429s and truncation).
+- `OPENROUTER_CATEGORIZER_MODEL` / `OPENROUTER_CATEGORIZER_FALLBACK_MODEL` — same DeepSeek + Gemini Flash Lite pair, used by the category tagger.
+- `OPENROUTER_WEEKLY_DIGEST_MODEL` / `OPENROUTER_WEEKLY_DIGEST_FALLBACK_MODEL` — `openai/gpt-5.6-luna` and `google/gemini-2.5-flash-lite`, used by the weekly digest (free Gemma endpoint removed).
 
 All of the above are Config Variables, not Secrets (see the Config reference below).
 - **Reasoning-effort handling is model-specific, not a fixed rule** — this

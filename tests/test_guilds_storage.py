@@ -20,13 +20,19 @@ def _dest_row(guild_id="1", channel_id="2", enabled=True, initial_sync_complete=
 
 
 class GuildsStorageTests(unittest.TestCase):
+    _KEYS = ("SUPABASE_URL", "SUPABASE_SECRET_KEY", "SUPABASE_SERVICE_KEY")
+
     def setUp(self):
-        self._orig = (config.SUPABASE_URL, config.SUPABASE_SERVICE_KEY)
+        # Save and blank BOTH key attributes so a local .env (loaded at
+        # config import) cannot leak into any assertion or header.
+        self._orig = {k: getattr(config, k) for k in self._KEYS}
         config.SUPABASE_URL = "https://x.supabase.co"
+        config.SUPABASE_SECRET_KEY = ""
         config.SUPABASE_SERVICE_KEY = "k"
 
     def tearDown(self):
-        (config.SUPABASE_URL, config.SUPABASE_SERVICE_KEY) = self._orig
+        for k, v in self._orig.items():
+            setattr(config, k, v)
 
     @patch("deal_bot.storage.guilds.transport.request")
     def test_load_destinations_valid(self, mock_req):

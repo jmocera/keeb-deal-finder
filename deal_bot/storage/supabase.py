@@ -13,12 +13,21 @@ from datetime import datetime, timedelta, timezone
 from deal_bot import config, transport
 
 
+def _uses_bearer_auth(key: str) -> bool:
+    """Legacy service_role keys are three dot-separated JWT segments. The new
+    sb_secret_... keys are not JWTs and must NOT be sent as a bearer token —
+    Supabase rejects a non-JWT Authorization header."""
+    if key.startswith("sb_secret_"):
+        return False
+    return key.count(".") == 2 and all(seg for seg in key.split("."))
+
+
 def _supabase_headers() -> dict:
-    return {
-        "apikey": config.SUPABASE_SERVICE_KEY,
-        "Authorization": f"Bearer {config.SUPABASE_SERVICE_KEY}",
-        "Content-Type": "application/json",
-    }
+    key = config.get_supabase_key()
+    headers = {"apikey": key, "Content-Type": "application/json"}
+    if _uses_bearer_auth(key):
+        headers["Authorization"] = f"Bearer {key}"
+    return headers
 
 
 def load_seen() -> dict | None:
@@ -26,7 +35,7 @@ def load_seen() -> dict | None:
     fetch failure (network exhausted or non-200), and {} only when there's no
     Supabase config (skip). Callers treat None as fatal — running on an empty
     seen map would treat every deal as new and risk double-posting."""
-    if not config.SUPABASE_URL or not config.SUPABASE_SERVICE_KEY:
+    if not config.SUPABASE_URL or not config.get_supabase_key():
         return {}
     url = f"{config.SUPABASE_URL}/rest/v1/seen_deals?select=id,source,last_seen,sale_price,lowest_price,lowest_price_date"
     resp = transport.request("GET", url, headers=_supabase_headers())
@@ -52,7 +61,7 @@ def upsert_seen_entry(deal_id: str, source: str, entry: dict) -> None:
     """Writes one row immediately after a successful post, so a Ctrl+C or
     later failure doesn't lose it — one row per post rather than
     rewriting a whole table/file each time."""
-    if not config.SUPABASE_URL or not config.SUPABASE_SERVICE_KEY:
+    if not config.SUPABASE_URL or not config.get_supabase_key():
         return
     url = f"{config.SUPABASE_URL}/rest/v1/seen_deals"
     headers = _supabase_headers()
@@ -85,7 +94,7 @@ def record_posted_deal(deal: dict) -> None:
     Table: posted_deals (id text pk, source text, title text, url text,
     sale_price numeric, list_price numeric, posted_at timestamptz default
     now())"""
-    if not config.SUPABASE_URL or not config.SUPABASE_SERVICE_KEY:
+    if not config.SUPABASE_URL or not config.get_supabase_key():
         return
     url = f"{config.SUPABASE_URL}/rest/v1/posted_deals"
     headers = _supabase_headers()
@@ -113,7 +122,7 @@ def record_posted_deal(deal: dict) -> None:
 
 
 def prune_seen(ttl_days: int) -> None:
-    if not config.SUPABASE_URL or not config.SUPABASE_SERVICE_KEY:
+    if not config.SUPABASE_URL or not config.get_supabase_key():
         return
     cutoff = (datetime.now(timezone.utc) - timedelta(days=ttl_days)).isoformat()
     url = f"{config.SUPABASE_URL}/rest/v1/seen_deals"

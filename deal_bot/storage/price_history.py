@@ -17,7 +17,7 @@ from deal_bot.storage.supabase import _supabase_headers
 
 
 def record_price_observations(deals: list[dict]) -> None:
-    if not config.SUPABASE_URL or not config.SUPABASE_SERVICE_KEY or not deals:
+    if not config.SUPABASE_URL or not config.get_supabase_key() or not deals:
         return
     url = f"{config.SUPABASE_URL}/rest/v1/price_history?on_conflict=deal_id,observed_date"
     today = date.today().isoformat()
@@ -60,7 +60,7 @@ def get_price_history_stats_bulk(deal_ids: list[str]) -> dict[str, dict]:
     `drops` counts day-over-day DECREASES across sorted distinct days —
     the raw material for the AI prompts' factual price-trend line."""
     results: dict[str, dict] = {}
-    if not config.SUPABASE_URL or not config.SUPABASE_SERVICE_KEY or not deal_ids:
+    if not config.SUPABASE_URL or not config.get_supabase_key() or not deal_ids:
         return results
 
     unique_ids = list(dict.fromkeys(deal_ids))  # de-dupe, keep it simple

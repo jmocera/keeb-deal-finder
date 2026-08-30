@@ -58,7 +58,7 @@ def log_run(
     skipped_not_near_historical_low: int, digest_sent: bool, error: str | None,
     skipped_not_desirable: int = 0, shadow_sent: bool = False,
 ) -> None:
-    if config.SUPABASE_URL and config.SUPABASE_SERVICE_KEY:
+    if config.SUPABASE_URL and config.get_supabase_key():
         url = f"{config.SUPABASE_URL}/rest/v1/run_log"
         row = {
             "deals_checked": deals_checked,

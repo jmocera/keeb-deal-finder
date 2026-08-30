@@ -2,11 +2,11 @@
 
 Runs once a week (see .github/workflows/weekly_digest.yml), reads the
 `posted_deals` Supabase table (an append-only log written by the pipeline's
-`record_posted_deal`), and has the free Gemma model write a short roundup
+`record_posted_deal`), and has the configured AI models write a short roundup
 which is posted to the digest Discord channel and to Bluesky.
 
 One-time setup — run this in the Supabase SQL editor before the first run
-(the full, authoritative, idempotent DDL for ALL four tables lives in
+(the full, authoritative, idempotent DDL for ALL six tables lives in
 `supabase_schema.sql` at the repo root — paste that whole file instead of
 just this table):
 
@@ -67,7 +67,7 @@ def fetch_recent_posted(days: int = 7, limit: int | None = None) -> list[dict] |
     or a non-200, including a missing table) — distinct from [], which means
     "no Supabase config" or "genuinely no rows in the window." A missing
     table is now a real failure, not a silent skip."""
-    if not config.SUPABASE_URL or not config.SUPABASE_SERVICE_KEY:
+    if not config.SUPABASE_URL or not config.get_supabase_key():
         return []
     cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
     url = f"{config.SUPABASE_URL}/rest/v1/posted_deals"
@@ -91,7 +91,7 @@ def fetch_recent_posted(days: int = 7, limit: int | None = None) -> list[dict] |
 def prune_posted_deals(ttl_days: int = _PRUNE_DAYS) -> None:
     """Delete posted_deals rows older than ttl_days so the table stays
     bounded (it's an append-only log, otherwise it grows forever)."""
-    if not config.SUPABASE_URL or not config.SUPABASE_SERVICE_KEY:
+    if not config.SUPABASE_URL or not config.get_supabase_key():
         return
     cutoff = (datetime.now(timezone.utc) - timedelta(days=ttl_days)).isoformat()
     url = f"{config.SUPABASE_URL}/rest/v1/posted_deals"
@@ -106,7 +106,7 @@ def prune_posted_deals(ttl_days: int = _PRUNE_DAYS) -> None:
 def seed_posted_deals(count: int = 7) -> None:
     """Insert `count` fake rows for end-to-end testing. Delete them after
     with --clear (or manually). Only ever used by the operator for the E2E."""
-    if not config.SUPABASE_URL or not config.SUPABASE_SERVICE_KEY:
+    if not config.SUPABASE_URL or not config.get_supabase_key():
         print("[weekly] no Supabase config — cannot seed")
         return
     url = f"{config.SUPABASE_URL}/rest/v1/posted_deals"
@@ -144,7 +144,7 @@ def clear_posted_deals() -> None:
     """Delete every row seeded by seed_posted_deals (id prefix 'seed:') —
     cleanup after a seed-based E2E. PostgREST refuses unbounded DELETEs, so
     we scope to the seed prefix rather than wiping the whole table."""
-    if not config.SUPABASE_URL or not config.SUPABASE_SERVICE_KEY:
+    if not config.SUPABASE_URL or not config.get_supabase_key():
         print("[weekly] no Supabase config — nothing to clear")
         return
     url = f"{config.SUPABASE_URL}/rest/v1/posted_deals"
@@ -159,7 +159,7 @@ def clear_posted_deals() -> None:
 
 
 def build_weekly_digest(deals: list[dict]) -> str:
-    """One AI call (free Gemma → paid Gemma fallback) writing the roundup.
+    """One AI call (primary model → fallback model) writing the roundup.
     Returns "" on total failure so the caller can skip posting."""
     if not deals or not config.OPENROUTER_API_KEY:
         return ""

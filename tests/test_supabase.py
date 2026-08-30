@@ -23,13 +23,19 @@ def _deal() -> dict:
 
 
 class RecordPostedDealTests(unittest.TestCase):
+    _KEYS = ("SUPABASE_URL", "SUPABASE_SECRET_KEY", "SUPABASE_SERVICE_KEY")
+
     def setUp(self):
-        self._orig = (config.SUPABASE_URL, config.SUPABASE_SERVICE_KEY)
+        # Save and blank BOTH key attributes so a local .env (loaded at
+        # config import) cannot leak into any assertion or header.
+        self._orig = {k: getattr(config, k) for k in self._KEYS}
         config.SUPABASE_URL = "https://x.supabase.co"
+        config.SUPABASE_SECRET_KEY = ""
         config.SUPABASE_SERVICE_KEY = "k"
 
     def tearDown(self):
-        (config.SUPABASE_URL, config.SUPABASE_SERVICE_KEY) = self._orig
+        for k, v in self._orig.items():
+            setattr(config, k, v)
 
     @patch("deal_bot.storage.supabase.transport.request")
     def test_row_carries_explicit_utc_posted_at(self, mock_req):
@@ -58,9 +64,62 @@ class RecordPostedDealTests(unittest.TestCase):
 
     def test_no_config_is_a_no_op(self):
         with patch.object(config, "SUPABASE_URL", ""), \
+             patch.object(config, "SUPABASE_SECRET_KEY", ""), \
+             patch.object(config, "SUPABASE_SERVICE_KEY", ""), \
              patch("deal_bot.storage.supabase.transport.request") as mock_req:
             supabase.record_posted_deal(_deal())
             mock_req.assert_not_called()
+
+
+class SupabaseHeadersTests(unittest.TestCase):
+    def setUp(self):
+        self._orig = (config.SUPABASE_URL, config.SUPABASE_SECRET_KEY, config.SUPABASE_SERVICE_KEY)
+
+    def tearDown(self):
+        (config.SUPABASE_URL, config.SUPABASE_SECRET_KEY, config.SUPABASE_SERVICE_KEY) = self._orig
+
+    def test_sb_secret_key_uses_apikey_only(self):
+        # sb_secret_... keys are not JWTs: they go in `apikey` only, with no
+        # Authorization header at all.
+        config.SUPABASE_SECRET_KEY = "sb_secret_demo"
+        config.SUPABASE_SERVICE_KEY = ""
+        headers = supabase._supabase_headers()
+        self.assertEqual(headers["apikey"], "sb_secret_demo")
+        self.assertNotIn("Authorization", headers)
+        self.assertEqual(headers["Content-Type"], "application/json")
+
+    def test_legacy_jwt_gets_bearer(self):
+        config.SUPABASE_SECRET_KEY = "aaa.bbb.ccc"
+        config.SUPABASE_SERVICE_KEY = ""
+        headers = supabase._supabase_headers()
+        self.assertEqual(headers["apikey"], "aaa.bbb.ccc")
+        self.assertEqual(headers["Authorization"], "Bearer aaa.bbb.ccc")
+
+    def test_service_key_attribute_still_works(self):
+        # Legacy env name only: same bearer shape as before this change.
+        config.SUPABASE_SECRET_KEY = ""
+        config.SUPABASE_SERVICE_KEY = "aaa.bbb.ccc"
+        headers = supabase._supabase_headers()
+        self.assertEqual(headers["apikey"], "aaa.bbb.ccc")
+        self.assertEqual(headers["Authorization"], "Bearer aaa.bbb.ccc")
+
+    def test_dotted_sb_secret_key_never_gets_bearer(self):
+        # Regression: even a malformed sb_secret_ value containing two dots
+        # must never leak into Authorization — the prefix guard wins over
+        # legacy JWT shape detection.
+        config.SUPABASE_SECRET_KEY = "sb_secret_abc.def.ghi"
+        config.SUPABASE_SERVICE_KEY = ""
+        headers = supabase._supabase_headers()
+        self.assertEqual(headers["apikey"], "sb_secret_abc.def.ghi")
+        self.assertNotIn("Authorization", headers)
+
+    def test_uses_bearer_auth_unit(self):
+        self.assertTrue(supabase._uses_bearer_auth("aaa.bbb.ccc"))
+        self.assertFalse(supabase._uses_bearer_auth("sb_secret_demo"))
+        self.assertFalse(supabase._uses_bearer_auth("sb_secret_abc.def.ghi"))
+        self.assertFalse(supabase._uses_bearer_auth("k"))
+        self.assertFalse(supabase._uses_bearer_auth("a..c"))  # empty segment
+        self.assertFalse(supabase._uses_bearer_auth("a.b.c.d"))  # 3 dots
 
 
 if __name__ == "__main__":

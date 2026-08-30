@@ -144,19 +144,24 @@ class CategorizeDealsTests(unittest.TestCase):
         self.assertIn("Deal 2", sent_user_prompt)
 
     @patch("deal_bot.ai.categorizer._call_openrouter")
-    def test_response_format_is_json_object(self, mock_call):
+    def test_response_format_is_strict_json_schema(self, mock_call):
         mock_call.return_value = '{"categories": ["switch"]}'
         categorizer.categorize_deals([_make_deal(1)])
+        rf = mock_call.call_args.kwargs.get("response_format")
+        self.assertEqual(rf["type"], "json_schema")
+        self.assertTrue(rf["json_schema"]["strict"])
         self.assertEqual(
-            mock_call.call_args.kwargs.get("response_format"),
-            {"type": "json_object"},
+            rf["json_schema"]["schema"]["properties"]["categories"]["items"]["enum"],
+            list(config.DEAL_CATEGORIES),
         )
 
     @patch("deal_bot.ai.categorizer._call_openrouter")
-    def test_reasoning_is_omitted(self, mock_call):
+    def test_reasoning_is_explicitly_disabled(self, mock_call):
+        # Reasoning-capable models burn their token budget on the reasoning
+        # trace and truncate the JSON — lock in the explicit disable.
         mock_call.return_value = '{"categories": ["switch"]}'
         categorizer.categorize_deals([_make_deal(1)])
-        self.assertNotIn("reasoning", mock_call.call_args.kwargs)
+        self.assertEqual(mock_call.call_args.kwargs.get("reasoning"), {"enabled": False})
 
     @patch("deal_bot.ai.categorizer._call_openrouter")
     def test_system_prompt_requires_json_categories_shape(self, mock_call):

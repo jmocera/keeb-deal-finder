@@ -64,8 +64,8 @@ def run_watchdog(max_hours: int = 6) -> bool:
     know anything, and a false "no run in 6h" alarm every hour would just
     train the operator to ignore it (misconfiguration surfaces as loud
     console output in the Actions log instead)."""
-    if not config.SUPABASE_URL or not config.SUPABASE_SERVICE_KEY:
-        print("[watchdog] SUPABASE_URL / SUPABASE_SERVICE_KEY not set — nothing to check, skipping alert")
+    if not config.SUPABASE_URL or not config.get_supabase_key():
+        print("[watchdog] SUPABASE_URL / SUPABASE_SECRET_KEY (or legacy SUPABASE_SERVICE_KEY) not set — nothing to check, skipping alert")
         return False
 
     last_run = fetch_last_run()

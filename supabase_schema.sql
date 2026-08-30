@@ -4,16 +4,19 @@
 -- bot's SUPABASE_URL points at, once, as the one-time setup. Everything is
 -- idempotent (create table/index if not exists), so re-running it is safe.
 --
--- The four tables below are what deal_bot expects (see deal_bot/storage/*,
+-- The six tables below are what deal_bot expects (see deal_bot/storage/*,
 -- deal_bot/pipeline.py:log_run, and deal_bot/weekly_digest.py). Keeping the
 -- DDL in the repo (rather than only in scattered docstrings) means the
 -- schema is version-controlled and reviewable, and provisioning is a single
 -- paste instead of a reconstruction.
 --
--- NOTE: the service-role key used by the bot talks to these tables via the
--- PostgREST REST API; per the project's design, PostgREST manages row-level
--- auth for the service role. No RLS policies are created here — they are a
--- project-level concern, not schema the bot needs.
+-- NOTE: the bot talks to these tables via the PostgREST REST API using the
+-- privileged server key (SUPABASE_SECRET_KEY, preferred, or the legacy
+-- SUPABASE_SERVICE_KEY). The hardening block at the bottom enables Row Level
+-- Security on every table with NO permissive policies and revokes grants
+-- from the public API roles — the bot is unaffected because its privileged
+-- key maps to the service_role context, which bypasses RLS and holds
+-- explicit grants.
 
 -- ==========================================================================
 -- seen_deals — dedupe state, keyed by deal id ("source:<sku/offerid/appid>").
@@ -141,3 +144,45 @@ comment on column guild_deal_posts.posted_at is
 
 create index if not exists guild_deal_posts_guild_id_idx
   on guild_deal_posts (guild_id);
+
+-- ==========================================================================
+-- Hardening (idempotent — safe to re-run on every paste):
+--   1. Row Level Security is enabled on every table with NO permissive
+--      policies, so anon/authenticated are denied by default. The bot only
+--      ever connects with the privileged server key, which maps to the
+--      service_role context and BYPASSES RLS.
+--   2. Privileges are revoked from PUBLIC, anon, and authenticated so the
+--      public API surface has no table or sequence access even if a
+--      permissive policy were added later by mistake.
+--   3. Explicit grants give service_role the DML + sequence access the bot
+--      needs, without depending on Supabase default privileges.
+--   4. Do NOT add permissive policies for anon/authenticated — this schema
+--      intentionally exposes nothing through the public API roles.
+-- ==========================================================================
+alter table public.seen_deals enable row level security;
+revoke all on public.seen_deals from public, anon, authenticated;
+grant select, insert, update, delete on public.seen_deals to service_role;
+
+alter table public.price_history enable row level security;
+revoke all on public.price_history from public, anon, authenticated;
+grant select, insert, update, delete on public.price_history to service_role;
+revoke all on sequence public.price_history_id_seq from public, anon, authenticated;
+grant usage, select on sequence public.price_history_id_seq to service_role;
+
+alter table public.run_log enable row level security;
+revoke all on public.run_log from public, anon, authenticated;
+grant select, insert, update, delete on public.run_log to service_role;
+revoke all on sequence public.run_log_id_seq from public, anon, authenticated;
+grant usage, select on sequence public.run_log_id_seq to service_role;
+
+alter table public.posted_deals enable row level security;
+revoke all on public.posted_deals from public, anon, authenticated;
+grant select, insert, update, delete on public.posted_deals to service_role;
+
+alter table public.guild_destinations enable row level security;
+revoke all on public.guild_destinations from public, anon, authenticated;
+grant select, insert, update, delete on public.guild_destinations to service_role;
+
+alter table public.guild_deal_posts enable row level security;
+revoke all on public.guild_deal_posts from public, anon, authenticated;
+grant select, insert, update, delete on public.guild_deal_posts to service_role;

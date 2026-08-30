@@ -3,18 +3,44 @@
 Turns a messy retail title into a concise product name plus up to 4 short
 technical specs, feeding both the Discord embed and the caption prompt.
 
-Model chain: primary (structured-output capable) with `response_format`, then
-the fallback model *without* `response_format` (it doesn't support it), then
-raw title + empty specs — fails open at every stage.
+Batching (`extract_clean_specs_batch`) is strictly bounded: ONE call per
+model (primary, then fallback — each validated inside the model loop for
+parse, shape, and item cardinality), and on total failure deterministic
+defaults (raw title + empty specs). It NEVER fans out to per-item calls —
+a degraded batch must not become an unbounded retry storm. The standalone
+`extract_clean_specs()` keeps its own two-model chain for deliberate
+single-item callers. Reasoning is explicitly disabled for extraction —
+reasoning-capable models burn their entire token budget on the reasoning
+trace and return empty content otherwise.
 """
 
 import json
 import re
 
 from deal_bot import config
-from deal_bot.ai.client import _call_openrouter
+from deal_bot.ai.client import _call_openrouter, _strict_json_response_format
 
 _JSON_OBJECT_RE = re.compile(r"\{.*\}", re.DOTALL)
+
+# Strict structured-output schema for the batch extraction: all fields
+# required, no extras, specs capped at 4 — matching the validation rules.
+_SPEC_ITEM_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "clean_title": {"type": "string"},
+        "specs": {"type": "array", "items": {"type": "string"}, "maxItems": 4},
+    },
+    "required": ["clean_title", "specs"],
+    "additionalProperties": False,
+}
+_SPEC_BATCH_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "items": {"type": "array", "items": _SPEC_ITEM_SCHEMA},
+    },
+    "required": ["items"],
+    "additionalProperties": False,
+}
 
 # Batched analog of SPEC_EXTRACTION_SYSTEM_PROMPT (in config): same rules,
 # but for a numbered list, returned as a single JSON object of items.
@@ -114,12 +140,13 @@ def extract_clean_specs(title: str, description: str = "") -> dict:
 
 
 def extract_clean_specs_batch(titles: list[str]) -> list[dict]:
-    """Batched version of extract_clean_specs — one call for N titles instead
-    of N sequential calls (the dominant per-run latency/cost as volume climbs).
-    Per-item validation is identical. If the batched response doesn't parse to
-    a clean per-item list, falls back to the individual per-item calls so a
-    degraded batch never produces worse output than today (worst case equals
-    the previous behavior)."""
+    """Batched version of extract_clean_specs — ONE call per model for N
+    titles (at most two OpenRouter calls total, never per-item). Each
+    model's response is validated inside the model loop: unparseable,
+    structurally invalid, or wrong-item-count responses fall through to the
+    next model. If both models fail, returns deterministic defaults
+    ([{"clean_title": original_title, "specs": []}, ...]) — a degraded batch
+    never fans out into an unbounded per-item retry storm."""
     if not titles:
         return []
     if not config.OPENROUTER_API_KEY:
@@ -127,23 +154,30 @@ def extract_clean_specs_batch(titles: list[str]) -> list[dict]:
 
     user_prompt = "\n".join(f"{i + 1}. {t}" for i, t in enumerate(titles))
     max_tokens = min(4000, 400 + len(titles) * 60)
-    content = None
-    for model in (config.OPENROUTER_SPEC_EXTRACTION_MODEL, config.OPENROUTER_SPEC_FALLBACK_MODEL):
+    # Dedupe while preserving order: an operator pointing both chain slots
+    # at the same model must not get charged two identical calls.
+    models = list(dict.fromkeys((
+        config.OPENROUTER_SPEC_EXTRACTION_MODEL,
+        config.OPENROUTER_SPEC_FALLBACK_MODEL,
+    )))
+    for model in models:
         content = _call_openrouter(
             model, _BATCH_SPEC_SYSTEM_PROMPT, user_prompt,
             temperature=0.0, max_tokens=max_tokens, timeout=30,
-            response_format={"type": "json_object"},
+            response_format=_strict_json_response_format(
+                "spec_extraction_batch", _SPEC_BATCH_SCHEMA),
+            # Deliberately disabled (not merely omitted): reasoning-capable
+            # models burn their entire token budget on the reasoning trace
+            # and return empty content. Re-verify empirically before
+            # re-enabling for a new model.
+            reasoning={"enabled": False},
         )
-        if content:
-            break
+        parsed = _parse_json_object(content) or {}
+        items = parsed.get("items")
+        if (isinstance(items, list) and len(items) == len(titles)
+                and all(isinstance(x, dict) for x in items)):
+            return [_validate_result(t, item) for t, item in zip(titles, items)]
+        print(f"[openrouter] batch spec extraction from {model} unusable — trying next")
 
-    parsed = _parse_json_object(content) or {}
-    items = parsed.get("items")
-    if (isinstance(items, list) and len(items) == len(titles)
-            and all(isinstance(x, dict) for x in items)):
-        return [_validate_result(t, item) for t, item in zip(titles, items)]
-
-    # The batch didn't come back structurally clean — fall back to the
-    # per-item function so each title still gets its own extraction attempt.
-    print("[openrouter] batch spec extraction unusable — falling back to per-item")
-    return [extract_clean_specs(t) for t in titles]
+    print("[openrouter] batch spec extraction unusable — deterministic raw-title defaults")
+    return [{"clean_title": t, "specs": []} for t in titles]

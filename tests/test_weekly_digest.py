@@ -3,6 +3,8 @@
 Stdlib only (unittest + unittest.mock). Every network call is mocked — no
 real Supabase/OpenRouter/Discord/Bluesky traffic.
 """
+import importlib
+import os
 import sys
 import unittest
 from pathlib import Path
@@ -83,6 +85,7 @@ class SupabaseRequestRetryTests(unittest.TestCase):
     def test_success_on_first_try_does_not_sleep(self, mock_net, mock_sleep):
         mock_net.return_value = _resp(200)
         with patch.object(config, "SUPABASE_URL", "https://x.supabase.co"), \
+             patch.object(config, "SUPABASE_SECRET_KEY", ""), \
              patch.object(config, "SUPABASE_SERVICE_KEY", "k"):
             resp = weekly_digest._supabase_request("GET", "https://x.supabase.co/rest/v1/posted_deals")
         self.assertIsNotNone(resp)
@@ -94,6 +97,7 @@ class SupabaseRequestRetryTests(unittest.TestCase):
     def test_retries_transient_then_succeeds(self, mock_net, mock_sleep):
         mock_net.side_effect = [_resp(503), _resp(200)]
         with patch.object(config, "SUPABASE_URL", "https://x.supabase.co"), \
+             patch.object(config, "SUPABASE_SECRET_KEY", ""), \
              patch.object(config, "SUPABASE_SERVICE_KEY", "k"):
             resp = weekly_digest._supabase_request("GET", "https://x.supabase.co/rest/v1/posted_deals")
         self.assertEqual(resp.status_code, 200)
@@ -105,6 +109,7 @@ class SupabaseRequestRetryTests(unittest.TestCase):
     def test_exhausts_retries_on_network_error(self, mock_net, mock_sleep):
         mock_net.side_effect = [requests.RequestException("net")] * 3
         with patch.object(config, "SUPABASE_URL", "https://x.supabase.co"), \
+             patch.object(config, "SUPABASE_SECRET_KEY", ""), \
              patch.object(config, "SUPABASE_SERVICE_KEY", "k"):
             resp = weekly_digest._supabase_request("GET", "https://x.supabase.co/rest/v1/posted_deals")
         self.assertIsNone(resp)
@@ -116,6 +121,7 @@ class SupabaseRequestRetryTests(unittest.TestCase):
     def test_permanent_4xx_is_not_retried(self, mock_net, mock_sleep):
         mock_net.return_value = _resp(404)
         with patch.object(config, "SUPABASE_URL", "https://x.supabase.co"), \
+             patch.object(config, "SUPABASE_SECRET_KEY", ""), \
              patch.object(config, "SUPABASE_SERVICE_KEY", "k"):
             resp = weekly_digest._supabase_request("GET", "https://x.supabase.co/rest/v1/posted_deals")
         self.assertIsNotNone(resp)  # the 404 response is returned as-is
@@ -131,6 +137,7 @@ class SupabaseRequestRetryTests(unittest.TestCase):
         resp429.headers = {"Retry-After": "3600"}
         mock_net.side_effect = [resp429, _resp(200)]
         with patch.object(config, "SUPABASE_URL", "https://x.supabase.co"), \
+             patch.object(config, "SUPABASE_SECRET_KEY", ""), \
              patch.object(config, "SUPABASE_SERVICE_KEY", "k"):
             resp = weekly_digest._supabase_request("GET", "https://x.supabase.co/rest/v1/posted_deals")
         self.assertEqual(resp.status_code, 200)
@@ -148,6 +155,7 @@ class FetchRecentPostedTests(unittest.TestCase):
     def test_non_200_returns_none(self, mock_req):
         mock_req.return_value = _resp(404)
         with patch.object(config, "SUPABASE_URL", "https://x.supabase.co"), \
+             patch.object(config, "SUPABASE_SECRET_KEY", ""), \
              patch.object(config, "SUPABASE_SERVICE_KEY", "k"):
             self.assertIsNone(weekly_digest.fetch_recent_posted())
 
@@ -155,6 +163,7 @@ class FetchRecentPostedTests(unittest.TestCase):
     def test_network_failure_returns_none(self, mock_req):
         mock_req.return_value = None
         with patch.object(config, "SUPABASE_URL", "https://x.supabase.co"), \
+             patch.object(config, "SUPABASE_SECRET_KEY", ""), \
              patch.object(config, "SUPABASE_SERVICE_KEY", "k"):
             self.assertIsNone(weekly_digest.fetch_recent_posted())
 
@@ -162,6 +171,7 @@ class FetchRecentPostedTests(unittest.TestCase):
     def test_success_returns_rows(self, mock_req):
         mock_req.return_value = _resp(200)
         with patch.object(config, "SUPABASE_URL", "https://x.supabase.co"), \
+             patch.object(config, "SUPABASE_SECRET_KEY", ""), \
              patch.object(config, "SUPABASE_SERVICE_KEY", "k"):
             result = weekly_digest.fetch_recent_posted()
         self.assertEqual(len(result), 1)
@@ -181,6 +191,7 @@ class RecordPostedDealTests(unittest.TestCase):
         resp.text = "table does not exist"
         mock_req.return_value = resp
         with patch.object(config, "SUPABASE_URL", "https://x.supabase.co"), \
+             patch.object(config, "SUPABASE_SECRET_KEY", ""), \
              patch.object(config, "SUPABASE_SERVICE_KEY", "k"):
             supabase.record_posted_deal(_posted(1))  # must not raise
         mock_req.assert_called_once()
@@ -197,6 +208,7 @@ class PrunePostedDealsTests(unittest.TestCase):
     def test_prunes_with_cutoff(self, mock_req):
         mock_req.return_value = _resp(204)
         with patch.object(config, "SUPABASE_URL", "https://x.supabase.co"), \
+             patch.object(config, "SUPABASE_SECRET_KEY", ""), \
              patch.object(config, "SUPABASE_SERVICE_KEY", "k"):
             weekly_digest.prune_posted_deals(ttl_days=90)
         self.assertIn("posted_at", mock_req.call_args.kwargs["params"])
@@ -213,6 +225,7 @@ class SeedClearPostedDealsTests(unittest.TestCase):
     def test_seed_posts_rows(self, mock_req):
         mock_req.return_value = _resp(201)
         with patch.object(config, "SUPABASE_URL", "https://x.supabase.co"), \
+             patch.object(config, "SUPABASE_SECRET_KEY", ""), \
              patch.object(config, "SUPABASE_SERVICE_KEY", "k"):
             weekly_digest.seed_posted_deals(3)
         sent = mock_req.call_args.kwargs["json"]
@@ -229,6 +242,7 @@ class SeedClearPostedDealsTests(unittest.TestCase):
     def test_clear_deletes_seeded_rows_only(self, mock_req):
         mock_req.return_value = _resp(204)
         with patch.object(config, "SUPABASE_URL", "https://x.supabase.co"), \
+             patch.object(config, "SUPABASE_SECRET_KEY", ""), \
              patch.object(config, "SUPABASE_SERVICE_KEY", "k"):
             weekly_digest.clear_posted_deals()
         mock_req.assert_called_once()
@@ -322,6 +336,30 @@ class ExitCodeTests(unittest.TestCase):
 
     def test_failed_is_one(self):
         self.assertEqual(weekly_digest._exit_code(False), 1)
+
+
+class WeeklyDigestModelDefaultsTests(unittest.TestCase):
+    """The weekly digest's production defaults must be the paid chain
+    (GPT-5.6 Luna primary, Gemini Flash Lite fallback) — no free endpoints.
+    Verified by reloading config with the env vars popped and .env loading
+    disabled, so a local .env cannot mask a bad default."""
+
+    def test_defaults_are_paid_chain(self):
+        saved_attrs = (config.OPENROUTER_WEEKLY_DIGEST_MODEL,
+                       config.OPENROUTER_WEEKLY_DIGEST_FALLBACK_MODEL)
+        try:
+            with patch.dict(os.environ), patch("deal_bot.config.load_dotenv"):
+                os.environ.pop("OPENROUTER_WEEKLY_DIGEST_MODEL", None)
+                os.environ.pop("OPENROUTER_WEEKLY_DIGEST_FALLBACK_MODEL", None)
+                importlib.reload(config)
+                self.assertEqual(config.OPENROUTER_WEEKLY_DIGEST_MODEL, "openai/gpt-5.6-luna")
+                self.assertEqual(
+                    config.OPENROUTER_WEEKLY_DIGEST_FALLBACK_MODEL,
+                    "google/gemini-2.5-flash-lite",
+                )
+        finally:
+            (config.OPENROUTER_WEEKLY_DIGEST_MODEL,
+             config.OPENROUTER_WEEKLY_DIGEST_FALLBACK_MODEL) = saved_attrs
 
 
 if __name__ == "__main__":

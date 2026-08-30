@@ -1,20 +1,28 @@
 """Manual eval runner for the category tagger — NOT part of CI.
 
-Skipped automatically when OPENROUTER_API_KEY is unset (so CI shows
-"skipped" rather than failing on missing credentials). Run locally with
-the key exported to measure real-model accuracy against the EVAL_TITLES
-ground-truth set. CI does not see the key, so this file is effectively a
-no-op there.
+Skipped automatically unless BOTH OPENROUTER_API_KEY is set and the explicit
+RUN_LIVE_CATEGORIZER_EVAL=1 flag is present (so CI — and any normal local
+`python -m unittest discover` run — shows "skipped" rather than calling
+OpenRouter; a key sitting in .env is NOT sufficient on its own). Run locally
+with the key exported AND the flag set to measure real-model accuracy against
+the EVAL_TITLES ground-truth set.
 """
 import os
 import sys
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from deal_bot import config
 from deal_bot.ai import categorizer
+
+
+def _live_eval_enabled() -> bool:
+    """Live eval requires BOTH a real key and the explicit opt-in flag.
+    A key present in .env alone (loaded by config import) is NOT sufficient."""
+    return bool(os.environ.get("OPENROUTER_API_KEY")) and os.environ.get("RUN_LIVE_CATEGORIZER_EVAL", "") == "1"
 
 
 # 15 realistic keyboard deal (source, title, expected_category) tuples.
@@ -42,8 +50,8 @@ EVAL_TITLES = [
 
 
 @unittest.skipUnless(
-    os.environ.get("OPENROUTER_API_KEY"),
-    "OPENROUTER_API_KEY not set — eval is a manual, CI-skipped runner",
+    _live_eval_enabled(),
+    "requires OPENROUTER_API_KEY and RUN_LIVE_CATEGORIZER_EVAL=1 — manual live runner, skipped in the normal suite",
 )
 class CategorizerEvalTests(unittest.TestCase):
     def test_accuracy_at_or_above_90_percent(self):
@@ -73,6 +81,37 @@ class CategorizerEvalTests(unittest.TestCase):
                 print(f"  MISS [{source}] {title!r}: expected={exp!r} got={got!r}")
         self.assertGreaterEqual(
             accuracy, 0.90, f"categorizer accuracy {accuracy:.0%} below 90% threshold"
+        )
+
+
+class EvalGuardTests(unittest.TestCase):
+    """Always-run tests for the dual-condition live-eval guard itself — these
+    run in the normal suite and prove the live test cannot fire without the
+    explicit opt-in flag."""
+
+    def test_guard_requires_flag(self):
+        with patch.dict(os.environ, {"OPENROUTER_API_KEY": "test-key", "RUN_LIVE_CATEGORIZER_EVAL": ""}):
+            self.assertFalse(_live_eval_enabled())
+        for flag_value in ("0", "true", "yes", "1 "):
+            with self.subTest(flag=flag_value):
+                with patch.dict(os.environ, {"OPENROUTER_API_KEY": "test-key", "RUN_LIVE_CATEGORIZER_EVAL": flag_value}):
+                    self.assertFalse(_live_eval_enabled())
+
+    def test_guard_requires_key(self):
+        with patch.dict(os.environ, {"OPENROUTER_API_KEY": "", "RUN_LIVE_CATEGORIZER_EVAL": "1"}):
+            self.assertFalse(_live_eval_enabled())
+
+    def test_guard_enabled_with_both(self):
+        with patch.dict(os.environ, {"OPENROUTER_API_KEY": "test-key", "RUN_LIVE_CATEGORIZER_EVAL": "1"}):
+            self.assertTrue(_live_eval_enabled())
+
+    def test_eval_class_skip_state_matches_guard(self):
+        # The class-level skip decision is made at import time; compare it
+        # against a fresh evaluation of the same dual-condition guard so the
+        # guard cannot silently regress to key-only.
+        self.assertEqual(
+            bool(getattr(CategorizerEvalTests, "__unittest_skip__", False)),
+            not _live_eval_enabled(),
         )
 
 
