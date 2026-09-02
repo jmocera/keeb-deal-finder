@@ -51,15 +51,15 @@ class VerdictBatchTests(unittest.TestCase):
     @patch.object(verdicts, "_call_openrouter")
     def test_valid_batch_returns_both_fields(self, mock_call):
         mock_call.return_value = (
-            '{"items": [{"caption": "Real floor price. #SSDDeals", '
+            '{"items": [{"caption": "Real floor price. #SSDDeals #KeebDeals", '
             '"analysis": "Strong price for a Gen4 drive."}, '
-            '{"caption": "Great monitor value. #GamingMonitor", '
+            '{"caption": "Great keyboard value. #GamingMonitor #KeebDeals", '
             '"analysis": "1440p high-refresh on a budget."}]}'
         )
         result = verdicts.build_verdicts_batch([_deal(), _deal(id="woot:2")])
-        self.assertEqual(result[0]["caption"], "Real floor price. #SSDDeals")
+        self.assertEqual(result[0]["caption"], "Real floor price. #SSDDeals #KeebDeals")
         self.assertEqual(result[0]["analysis"], "Strong price for a Gen4 drive.")
-        self.assertEqual(result[1]["caption"], "Great monitor value. #GamingMonitor")
+        self.assertEqual(result[1]["caption"], "Great keyboard value. #GamingMonitor #KeebDeals")
         self.assertEqual(result[1]["analysis"], "1440p high-refresh on a budget.")
 
     @patch("deal_bot.ai.captions._call_openrouter", return_value=None)
@@ -116,12 +116,30 @@ class VerdictBatchTests(unittest.TestCase):
     @patch.object(verdicts, "_call_openrouter")
     def test_overlength_analysis_dropped_independently(self, mock_verdict_call, _):
         mock_verdict_call.return_value = (
-            '{"items": [{"caption": "Fine caption here #Deals", '
+            '{"items": [{"caption": "Fine caption here #Deals #KeebDeals", '
             '"analysis": "' + "y" * 400 + '"}]}'
         )
         result = verdicts.build_verdicts_batch([_deal()])
-        self.assertEqual(result[0]["caption"], "Fine caption here #Deals")  # kept
+        self.assertEqual(result[0]["caption"], "Fine caption here #Deals #KeebDeals")  # kept
         self.assertEqual(result[0]["analysis"], "")  # dropped independently
+
+    @patch("deal_bot.ai.captions._call_openrouter", return_value=None)
+    @patch.object(verdicts, "_call_openrouter")
+    def test_invalid_caption_falls_back_to_tagged_mechanical(self, mock_verdict_call, mock_caption_chain):
+        # A caption without the required 2-4 trailing hashtags (here: zero
+        # tags) in an otherwise-valid batch falls back to the deterministic
+        # mechanical caption — which itself carries 2-3 valid tags — with
+        # NO extra AI call and the analysis kept independently.
+        mock_verdict_call.return_value = (
+            '{"items": [{"caption": "No hashtags at all in this one.", '
+            '"analysis": "Valid analysis text."}]}'
+        )
+        result = verdicts.build_verdicts_batch([_deal()])
+        self.assertEqual(result[0]["caption"], verdicts.build_x_caption_body(_deal()))
+        self.assertTrue(verdicts._hashtags_look_reasonable(result[0]["caption"]))
+        self.assertEqual(result[0]["analysis"], "Valid analysis text.")
+        self.assertEqual(mock_verdict_call.call_count, 1)  # valid batch: single call
+        mock_caption_chain.assert_not_called()  # no per-deal AI fallback
 
 
 if __name__ == "__main__":

@@ -1,12 +1,12 @@
-﻿"""Bounded-call regression tests for the batch AI modules.
+"""Bounded-call regression tests for the batch AI modules.
 
 The production retry storm these guard against: a batch model returning
 empty/malformed content used to fan out into per-item LLM calls (one call
-per deal â€” 124 Woot deals meant 124+ calls). The contract now: at most ONE
+per deal — 124 Woot deals meant 124+ calls). The contract now: at most ONE
 call per model in the chain (deduped), validation inside the model loop,
 and deterministic fail-open defaults with ZERO per-item calls.
 
-Every LLM call is mocked at the module boundary â€” no real OpenRouter
+Every LLM call is mocked at the module boundary — no real OpenRouter
 traffic, no live API.
 """
 import json
@@ -18,7 +18,7 @@ from unittest.mock import Mock, patch
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from deal_bot import config
-from deal_bot.ai import categorizer, classifier, deal_scorer, spec_extraction, verdicts
+from deal_bot.ai import categorizer, captions, classifier, deal_scorer, spec_extraction, verdicts
 from deal_bot.ai.client import _call_openrouter
 
 
@@ -37,7 +37,9 @@ def _spec_batch(n: int, clean: str = "Clean") -> str:
 
 
 def _verdict_batch(n: int) -> str:
-    return json.dumps({"items": [{"caption": f"Nice deal {i}. #Keebs", "analysis": f"Analysis {i}."}
+    # Valid captions must END with 2-4 hashtags (the strict caption
+    # validator would otherwise route them to the mechanical fallback).
+    return json.dumps({"items": [{"caption": f"Nice deal {i}. #Keebs #KeebDeals", "analysis": f"Analysis {i}."}
                                   for i in range(n)]})
 
 
@@ -101,7 +103,7 @@ class SpecBatchBoundsTests(BatchBoundsTestBase):
     @patch("deal_bot.ai.spec_extraction._call_openrouter")
     def test_batch_failure_makes_zero_per_item_calls(self, mock_call, mock_per_item):
         # The old behavior fanned out one LLM call per title on batch
-        # failure â€” the 124-deal retry storm. It must never happen again.
+        # failure — the 124-deal retry storm. It must never happen again.
         mock_call.side_effect = [None, None]
         result = spec_extraction.extract_clean_specs_batch([f"T{i}" for i in range(100)])
         mock_per_item.assert_not_called()
@@ -154,7 +156,7 @@ class VerdictBatchBoundsTests(BatchBoundsTestBase):
         self.assertEqual(mock_call.call_count, 2)
         self.assertEqual(mock_call.call_args_list[0].args[0], self.PRIMARY)
         self.assertEqual(mock_call.call_args_list[1].args[0], self.FALLBACK)
-        self.assertEqual(result[0]["caption"], "Nice deal 0. #Keebs")
+        self.assertEqual(result[0]["caption"], "Nice deal 0. #Keebs #KeebDeals")
         self.assertEqual(result[1]["analysis"], "Analysis 1.")
 
     @patch("deal_bot.ai.captions._call_openrouter")
@@ -195,6 +197,9 @@ class VerdictBatchBoundsTests(BatchBoundsTestBase):
         self.assertEqual(len(result), 124)
         for i, r in enumerate(result):
             self.assertEqual(r["caption"], verdicts.build_x_caption_body(_deal(i)))
+            # The hashtag regression fix: deterministic fallbacks must
+            # carry a valid trailing 2-4 tag block, not bare text.
+            self.assertTrue(captions._hashtags_look_reasonable(r["caption"]))
             self.assertEqual(r["analysis"], "")
 
     @patch("deal_bot.ai.captions._call_openrouter")
@@ -231,7 +236,7 @@ class VerdictBatchBoundsTests(BatchBoundsTestBase):
 
 class ClientStructuredOutputTests(BatchBoundsTestBase):
     """The shared client must require provider parameter support whenever
-    structured output is requested â€” centrally, not per caller."""
+    structured output is requested — centrally, not per caller."""
 
     @staticmethod
     def _mock_resp(content: str):
@@ -318,7 +323,7 @@ class ClassifierBoundsTests(ShadowStageBoundsTestBase):
 
     @patch("deal_bot.ai.classifier._call_openrouter")
     def test_empty_and_429_responses_fail_open(self, mock_call):
-        # None covers both "empty content" and non-200 (429) client paths â€”
+        # None covers both "empty content" and non-200 (429) client paths —
         # _call_openrouter returns None for both.
         mock_call.side_effect = [None, None]
         deals = self._deals(73)

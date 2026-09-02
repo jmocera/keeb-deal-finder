@@ -7,7 +7,51 @@ from deal_bot.ai.client import _call_openrouter
 from deal_bot.display import discount_str, price_str
 from deal_bot.post_len import caption_budget
 
-_HASHTAG_PATTERN = re.compile(r"#(\w+)")
+# A hashtag is '#' followed by 1-30 word characters containing at least one
+# Unicode alphabetic character — numeric/underscore-only references (#420,
+# ___) are product text, not discoverable tags. This shared pattern drives
+# Bluesky facet generation (integrations/bluesky.py consumes capture group 1
+# as the tag name and match.start()/end() for UTF-8 byte offsets — both
+# unchanged by the lookahead) and the validator's prose scan.
+_HASHTAG_PATTERN = re.compile(r"#(?=\w*[^\W\d_])(\w+)")
+# A fully valid hashtag TOKEN: the same alphabetic-tag shape as
+# _HASHTAG_PATTERN with the 1-30 length cap enforced on the whole token
+# (trailing punctuation breaks the fullmatch and invalidates the tag).
+_VALID_HASHTAG_TOKEN = re.compile(r"#(?=\w*[^\W\d_])\w{1,30}")
+
+# Deterministic mechanical-hashtag suffixes, keyed by the repository's
+# existing category vocabulary (config.DEAL_CATEGORIES as produced by the
+# categorizer). "other" and unclassifiable items share the safe generic
+# two-tag pair — an unknown item still gets keyboard-deals discoverability
+# rather than no hashtags.
+_MECHANICAL_TAG_SUFFIXES = {
+    "board": "#KeebDeals #MechanicalKeyboards #KeyboardBuilds",
+    "keycaps": "#KeebDeals #Keycaps #MechanicalKeyboards",
+    "switch": "#KeebDeals #KeyboardSwitches #MechanicalKeyboards",
+    "accessory": "#KeebDeals #KeebAccessories #MechanicalKeyboards",
+    "other": "#KeebDeals #MechanicalKeyboards",
+}
+
+# Title-based classification, most specific item type first so generic
+# "keyboard" wording never shadows keycaps/switches/accessories. Mirrors the
+# categorizer prompt's definitions: stabilizers are switch mechanics, cases/
+# plates/PCBs are board components, cables/mats/rests are accessories.
+_MECHANICAL_TAG_RULES = [
+    ("keycaps", re.compile(r"\bkey\s?caps?\b|\bkeysets?\b|\bartisan\b", re.IGNORECASE)),
+    ("switch", re.compile(
+        r"\bswitch(es)?\b|\bstabilizers?\b|\bstems?\b|\bsprings?\b|\blub(e|ing)\b",
+        re.IGNORECASE,
+    )),
+    ("accessory", re.compile(
+        r"\bcables?\b|\bcoiled\b|\baviator\b|\bdesk\s?mats?\b|\bwrist\s?rests?\b"
+        r"|\bpullers?\b|\bcleaning\b",
+        re.IGNORECASE,
+    )),
+    ("board", re.compile(
+        r"\bkeyboards?\b|\bbarebones?\b|\bhot-?swaps?\b|\bpcbs?\b|\bplates?\b|\bcases?\b",
+        re.IGNORECASE,
+    )),
+]
 
 
 def build_x_caption(deal: dict) -> str:
@@ -19,27 +63,76 @@ def build_x_caption(deal: dict) -> str:
 
 def build_x_caption_body(deal: dict) -> str:
     """Mechanical template body (no URL appended) — the same discount/price
-    line build_x_caption() has always produced, split out so the Bluesky
-    fitter can budget the URL separately."""
+    line build_x_caption() has always produced, now always ending with a
+    deterministic 2-3 tag suffix so the hashtag-free-fallback defect can't
+    recur. Split from build_x_caption() so the Bluesky fitter can budget
+    the URL separately."""
     discount = discount_str(deal["discount_pct"])
     price = price_str(deal["sale_price"], deal["list_price"])
     display_title = deal.get("clean_title") or deal["title"]
-    return f"{discount} — {display_title} — {price}"
+    body = f"{discount} — {display_title} — {price}"
+    return f"{body} {_mechanical_hashtag_suffix(deal)}"
+
+
+def _mechanical_hashtag_suffix(deal: dict) -> str:
+    """Deterministic, AI-free hashtag suffix (2-3 short, space-separated
+    tags) for the mechanical fallback caption.
+
+    Selection order:
+      1. deal["category"], but ONLY when it is one of the repository's
+         existing category values (config.DEAL_CATEGORIES vocabulary);
+         any other value is ignored rather than guessed at.
+      2. Conservative title/clean_title matching, most specific item type
+         first (keycaps -> switches -> accessories -> boards), so e.g. a
+         "keyboard cable" classifies as an accessory, not a board.
+      3. Safe generic keyboard-deals fallback for unknown items.
+    """
+    category = deal.get("category")
+    if isinstance(category, str):
+        suffix = _MECHANICAL_TAG_SUFFIXES.get(category.strip().lower())
+        if suffix:
+            return suffix
+    text = f"{deal.get('clean_title') or ''} {deal.get('title') or ''}"
+    for category, pattern in _MECHANICAL_TAG_RULES:
+        if pattern.search(text):
+            return _MECHANICAL_TAG_SUFFIXES[category]
+    return _MECHANICAL_TAG_SUFFIXES["other"]
 
 
 def _hashtags_look_reasonable(text: str) -> bool:
-    """Light sanity check, not a hard allow-list — the model is trusted
-    to pick contextually relevant hashtags per item (deliberately: real
-    output like #SSDDeals, #BaldursGate3, #GamingMonitor is more useful
-    than a fixed generic vocabulary would be), this just catches
-    obviously broken or spammy output before it posts. Also rejects any
-    URL the model sneaks in — the link is appended in code, and a
-    model-injected URL would consume budget and mis-target the link
-    facet."""
+    """Strict trailing-block validation for any accepted AI caption:
+      - 2 to 4 hashtags, and they must be the FINAL whitespace-separated
+        tokens of the caption (both the Bluesky tag facets and the post
+        fitter treat the trailing run as the tag block);
+      - each tag is '#' plus 1-30 word characters containing at least one
+        Unicode alphabetic character (so #KeychronQ1 and #3DPrinting count
+        but #420 and #___ do not), with nothing attached — a tag with
+        trailing punctuation is invalid, not salvageable;
+      - no hashtag may appear anywhere before that final block — a
+        mid-sentence tag is prose, not a discoverable tail, and would
+        silently break the ends-with-hashtags contract;
+      - no case-insensitive duplicate hashtags;
+      - still rejects any model-injected URL (the link is appended in
+        code, and a sneaked URL would consume budget and mis-target the
+        link facet).
+    Item-specific tags are deliberately NOT restricted to an allowlist —
+    the model is trusted to pick contextually relevant tags per item."""
     if re.search(r"https?://\S+", text):
         return False
-    tags = _HASHTAG_PATTERN.findall(text)
-    return len(tags) <= 4 and all(1 <= len(tag) <= 30 for tag in tags)
+    tokens = text.rstrip().split()
+    trailing = []
+    for token in reversed(tokens):
+        if _VALID_HASHTAG_TOKEN.fullmatch(token):
+            trailing.append(token)
+        else:
+            break
+    if not 2 <= len(trailing) <= 4:
+        return False
+    if any(_HASHTAG_PATTERN.search(tok) for tok in tokens[: len(tokens) - len(trailing)]):
+        return False
+    names = [token[1:] for token in trailing]
+    lowered = {name.casefold() for name in names}
+    return len(lowered) == len(names)
 
 
 def build_ai_caption(deal: dict) -> str:
